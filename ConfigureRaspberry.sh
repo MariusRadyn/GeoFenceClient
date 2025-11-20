@@ -89,11 +89,26 @@ echo "Installing MQQT"
 sudo apt update
 sudo apt install mosquitto mosquitto-clients
 sudo systemctl enable mosquitto
-sudo systemctl start mosquitto
+pip install paho-mqtt
+echo -e "\nlistener 1883 0.0.0.0\nallow_anonymous true" | sudo tee -a /etc/mosquitto/mosquitto.conf
+sudo systemctl restart mosquitto
 
 # ---------- 11. Install Bleak ----------
 echo "Installing Bleak"
 python3 -m pip install bleak
+
+# ---------- 12. Install Firebase ----------
+echo "Installing Bleak"
+python3 -m pip install firebase_admin
+
+# ---------- 13. Set Bluetooth Name ----------
+echo "Set Bluetooth Name"
+MAC=$(hciconfig hci0 | grep "BD Address" | awk '{print $3}')
+MAC_CLEAN=${MAC//:/}
+BLE_NAME="geoclient_${MAC_CLEAN}"
+echo "$BLE_NAME"
+sudo bluetoothctl system-alias "$BLE_NAME" 
+
 
 echo "Python version in venv:"
 python --version

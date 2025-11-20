@@ -3,7 +3,7 @@ from firebase_admin import credentials, firestore
 import datetime
 
 # Path to your service account JSON
-cred = credentials.Certificate("/home/geoserver/serviceAccountKey.json")
+cred = credentials.Certificate("/home/geoclient/serviceAccountKey.json")
 
 # Initialize Firebase
 firebase_admin.initialize_app(cred)
@@ -15,7 +15,7 @@ db = firestore.client()
 doc_ref = db.collection("test_collection").document("test_doc")
 doc_ref.set({
     "message": "Hello Firestore from Raspberry Pi!",
-    "timestamp": datetime.datetime.utcnow()
+    "timestamp": datetime.datetime.now()
 })
 
 # Test: read it back
