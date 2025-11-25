@@ -22,12 +22,10 @@ parser.add_argument(
 args = parser.parse_args()
 
 # Variables
-SECURE_DIR = "/etc/secure"
+SECURE_DIR = os.path.expanduser("~/.secure")
 KEY_FILE = f"{SECURE_DIR}/key.key"
 DATA_FILE = f"{SECURE_DIR}/wificredentials.enc"
 
-WIFI_SSID = ""
-WIFI_PASSWORD = ""
 
 def create_secure_dir():
     if not os.path.exists(SECURE_DIR):
@@ -87,9 +85,9 @@ def encrypt_credentials(data):
     cipher = Fernet(key)
     encrypted = cipher.encrypt(json_bytes)
     return encrypted
-def write_credentials_file(data):
+def write_credentials_file(data, encrypt=False):
     with open(DATA_FILE, "wb") as f:
-        if args.encrypt:
+        if encrypt:
             # Encrypted
             encrypted = encrypt_credentials(data)
             f.write(encrypted)
@@ -100,51 +98,60 @@ def write_credentials_file(data):
             print(f"Saved: {DATA_FILE} (Not Encrypted)")
 
     os.chmod(DATA_FILE, 0o600)
-def read_credentials_file():
-    with open(DATA_FILE, "rb") as data_file:
-        data = data_file.read()
+def read_credentials_file(encrypt=False):
+    creds = {"ssid": "", "password": ""}
 
-    if(args.encrypt == True):
+    if encrypt:
         # Encrypted
+        with open(DATA_FILE, "rb") as data_file:
+            data = data_file.read()
+
         with open(KEY_FILE, "rb") as key_file:
             key = key_file.read()
 
         cipher = Fernet(key)   
         data = cipher.decrypt(data)
         print("Decrypted")
-       
-    creds = json.loads(data.decode())
-    
-    #print(f"SSID: {creds['ssid']}")
-    #print(f"Password: {creds['password']}") 
+
+        data_dict = json.loads(data.decode())
+        creds["ssid"] = str(data_dict.get("ssid", ""))
+        creds["password"] = str(data_dict.get("password", ""))
+    else:
+        with open(DATA_FILE, "r") as f:
+            data_dict = json.load(f)
+            # normalize keys
+            creds["ssid"] = str(data_dict.get("ssid", ""))
+            creds["password"] = str(data_dict.get("password", ""))
+
     return creds    
-def restore_credentials():
+def get_credentials(new_creds =False, encrypt=False):
+   
+    creds = {
+        "ssid": "",
+        "password": ""
+    }
     create_secure_dir()
 
-    if args.new_creds:
+    if new_creds:
         # Create new credentials
+        print("Get new credentials")
         generate_key()
         data = enter_credentials()
 
         if data:
-            write_credentials_file(data)
+            write_credentials_file(data, encrypt)
+            creds = json.loads(data.decode())
     
     else:
         # Read existing credentials
         if os.path.exists(DATA_FILE):
-            print("WiFi credentials already exist.")
-            data = read_credentials_file()
-
-    creds = json.loads(data.decode())
-    
-    WIFI_SSID = creds['ssid']
-    WIFI_PASSWORD = creds['password'] 
-    
-    print(f"SSID: {WIFI_SSID}")
-    print(f"Password: {WIFI_PASSWORD}") 
+            print("Restore WiFi credentials")
+            creds = read_credentials_file(encrypt)
+   
+    return creds['ssid'], creds['password']
 
 def main():
-    restore_credentials()
+    get_credentials(new_creds=args.new_creds, encrypt=args.encrypt)
 
 if __name__ == "__main__":
     main()

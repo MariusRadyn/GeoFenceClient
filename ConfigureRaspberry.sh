@@ -109,6 +109,8 @@ BLE_NAME="geoclient_${MAC_CLEAN}"
 echo "$BLE_NAME"
 sudo bluetoothctl system-alias "$BLE_NAME" 
 
+# ---------- 14. Make secure Dir ----------
+mkdir -p /etc/secure
 
 echo "Python version in venv:"
 python --version

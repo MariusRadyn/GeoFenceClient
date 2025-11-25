@@ -42,7 +42,7 @@ class MqttServer:
     # Connect to the broker
     # -----------------------------
     async def connect(self):
-        print(f"[{self.client_id}] Connecting to broker {self.broker_ip}:{self.port}…")
+        print(f"MQTT Connecting {self.broker_ip}:{self.port} ... ")
         self.client.connect(self.broker_ip, self.port)
         self.client.loop_start()
 
@@ -50,18 +50,19 @@ class MqttServer:
     # Callback when connected
     # -----------------------------
     def on_connect(self, client, userdata, flags, reason_code, properties):
-        print(f"[{self.client_id}] Connected to broker: {reason_code}")
+        #print(f"[{self.client_id}] Connected to broker: {reason_code}")
+        print(f"MQTT Connected: {reason_code}")
         
         # Subscribe to request topic
         client.subscribe(MQTT_TOPIC_REQ)
-        print(f"[{self.client_id}] Subscribed to {MQTT_TOPIC_REQ}")
+        print(f"MQTT Subscribed: {MQTT_TOPIC_REQ}")
 
     # -----------------------------
     # Callback when message received
     # -----------------------------
     def on_message(self, client, userdata, msg):
-        print(f"[{self.client_id}] Request received on topic: {msg.topic}")
-        print(f"[{self.client_id}] Payload: {msg.payload.decode()}")
+        print(f"MQTT RX on topic: {msg.topic}")
+        print(f"MQTT Payload: {msg.payload.decode()}")
 
         try:
             payload = json.loads(msg.payload.decode())
@@ -73,13 +74,14 @@ class MqttServer:
         # Publish settings to response topic
         response_topic = f"{MQTT_TOPIC_RESPONSE}/{requester_id}"
         client.publish(response_topic, json.dumps(self.settings))
-        print(f"[{self.client_id}] Sent settings to {response_topic}")
+        print(f"MQTT TX to topic: {response_topic}")
 
     # -----------------------------
     # Callback when disconnected
     # -----------------------------
     def on_disconnect(self, client, userdata, rc):
-        print(f"[{self.client_id}] Disconnected from broker (rc={rc})")
+        #print(f"[{self.client_id}] Disconnected from broker (rc={rc})")
+        print(f"MQTT Disconnected: {rc}")
 
 # -----------------------------
 # Usage example
