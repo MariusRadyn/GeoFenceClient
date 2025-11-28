@@ -43,6 +43,7 @@ settings = {
 }
 INTERFACE_ETH = "eth0"  # Use Ethernet
 INTERFACE_WIFI = "wlan0" # Use WiFi
+IP_ADDRESS = ''
 
 #WiFi
 WIFI_SSID = ""
@@ -71,57 +72,64 @@ cred = credentials.Certificate(os.path.expanduser("~/Secure/ServiceAccountKey.js
 firebase_admin.initialize_app(cred)
 dbFire = firestore.client()
 
-# Methodes
+# Debug
 PRINT_DEBUG_ENABLED = False
+
+# Methodes
 def printDebug(msg):
     if PRINT_DEBUG_ENABLED:
         print(msg)
-def compare_local_fire_ip_adress():
+def sync_ip_address(ipLocal):
     global settings 
     
     # Write IP Address to Firestore
-    # when IP changes from local setting file
+    # Compare to last local IP address (settings)
+    # Update firestore when IP changed
     # Android will get IP from firestore
     
     read_settings()
     printDebug(f"IP Address (settings): {settings['ipadr']}")
-    
-    ipLocal = get_local_ip_address()  
     printDebug(f"IP Address (Unit): {ipLocal}")
     
-    # Compare Setting file
+    # Update Settings file
     if(ipLocal != settings["ipadr"]):
         printDebug(f"Local IP Address Changed: {ipLocal} -> {settings['ipadr']}"   )
         settings["ipadr"] = ipLocal
         write_local_settings()
    
-    # Compare Firestore
-    ipFire = fire_read_ip_adr()
+    # Update Firestore
+    ipFire = fire_read_ip_adr(BT_NAME)
 
     if(ipFire != ipLocal):
         printDebug(f"Update IP Address Firestore: {ipFire} -> {ipLocal}"   )
-        fire_write_ip_adr()  
+        fire_write_ip_adr(IP_ADDRESS, BT_NAME)
+        return True
+    return False  
 def get_local_ip_address(interface = INTERFACE_ETH):
     ip = "0.0.0.0"
     try:
-        # Get IP address for the specified interface
-        result = subprocess.run(
-            ["ifconfig", interface],
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        if(interface == INTERFACE_ETH):
+            # Get IP address for the specified interface
+            result = subprocess.run(
+                ["ifconfig", interface],
+                capture_output=True,
+                text=True,
+                check=True
+            )
 
-        # Search for the IPv4 address
-        match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", result.stdout)
-        if match:
-            ip = match.group(1)
-       
+            # Search for the IPv4 address
+            match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", result.stdout)
+            if match:
+                ip = match.group(1)
+                print("LAN Connected")
+            else:
+                print("LAN Connection")
+
     except subprocess.CalledProcessError:
-        print(f"Error: Could not get IP address for interface {interface}")
+        print(f"Error: get_local_ip_address(), Could not get IP address for interface {interface}")
     
     # Switch to WiFi if no IP found on Ethernet
-    if(ip == "0.0.0.0"):
+    if(interface == INTERFACE_WIFI or ip == "0.0.0.0"):
         try:
             # Try WiFi interface
             result = subprocess.run(
@@ -135,6 +143,9 @@ def get_local_ip_address(interface = INTERFACE_ETH):
             match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", result.stdout)
             if match:
                 ip = match.group(1)
+                print("Wifi Connected")
+            else:
+                print("No Wifi Connection")
         
         except subprocess.CalledProcessError:
             print(f"ERROR: get_local_ip_address(), Could not get IP address for interface wlan0")
@@ -200,28 +211,6 @@ def fire_read_ip_adr(bt_name=""):
     return "0.0.0.0"
 
 # Bluetooth Methods
-def bt_get_name():
-    printDebug("Getting Bluetooth Name... ")
-    try:
-        result = subprocess.run(
-            ["bluetoothctl", "show"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-
-        for line in result.stdout.splitlines():
-            if "Alias:" in line:
-                # Extract the name after 'Alias:'
-                name = line.split("Alias:")[1].strip()
-                printDebug(f"My Name: {name}")
-                return name
-        printDebug("Bluetooth name not found")
-        return ""
-
-    except Exception as e:
-        print(f"Error: bt_get_name(), {e}")
-        return ""
 async def bt_discover():
     global lstBtConnectedDevices
     showMsg = True
@@ -239,7 +228,7 @@ async def bt_discover():
         # Connect
         if not targets:
             if(showMsg):
-                print("No iOT devices found.")
+                print("No iOT devices found.\n")
 
                 for dev in lstBtConnectedDevices:
                     dev['connected'] = False
@@ -265,15 +254,6 @@ async def bt_discover():
         printDebug(f"BT Connected Status: {lstBtConnectedDevices}")
                     
         await asyncio.sleep(10)   # yield
-def bt_get_client(device):
-    printDebug(f"Getting BT Client for: {device.name} ({device.address}) ")
-
-    if device.address in BT_CLIENTS and BT_CLIENTS[device.address].is_connected:
-        printDebug(f"Already connected: {device.name} ({device.address}) ")
-        return  BT_CLIENTS.get(device.address)
-    else:
-        print(f"No BT Client found for: {device.name} ({device.address}) ")
-        return None
 async def bt_connect(device):
     global BT_CLIENTS
     address = device.address
@@ -283,7 +263,7 @@ async def bt_connect(device):
         printDebug(f"Already connected: {device.name} ({address}) ")
         return True
 
-    print(f"Connecting: {device.name} ({address})")
+    print(f"Connecting BT : {device.name} ({address}) ... ")
     
     client = BleakClient(device)
 
@@ -291,7 +271,7 @@ async def bt_connect(device):
         await client.connect()
 
         if not client.is_connected:
-            print(f"ERROR bt_connect(), Connection FAILED {device.name}")
+            print(f"ERROR bt_connect(), FAILED {device.name}")
             return False
 
         # Register disconnect handler
@@ -304,96 +284,115 @@ async def bt_connect(device):
         # Store and reuse this client
         BT_CLIENTS[address] = client
 
-        print(f"New Connection: {device.name}")
-
+        print(f"SUCCESSFUL")
         return True
 
     except Exception as e:
-        print(f"ERROR: bt_connect(), Device {device.name}: {e}")
+        print(f"ERROR: bt_connect(), {device.name}: {e}")
         return False
 async def bt_update_connection_status(device):
     global lstBtConnectedDevices
 
+    try:
+        addr = device.address
+        name = device.name if device.name else "Unknown"
+        date_time = datetime.datetime.now().strftime("%d:%m:%Y %H:%M:%S")
+
+        # Check if device is already in list
+        existing = next((x for x in lstBtConnectedDevices if x[CONNECT_ADR] == addr), None)
+
+        # Add new device if not found
+        if existing is None:
+            existing = {
+                CONNECT_ADR: addr,
+                CONNECT_NAME: name,
+                CONNECT_STATUS: False,
+                CONNECT_TIME: date_time
+            }
+            lstBtConnectedDevices.append(existing)
+            printDebug(f"New Device Found: {name} ({addr})")
+        else:
+            existing[CONNECT_STATUS] = False
+
+        client = bt_get_client(device)
+
+        if client and client.is_connected:
+            printDebug(f"Update Connection status: true")
+            existing[CONNECT_STATUS] = True
+            existing[CONNECT_TIME] = date_time
+
+    except Exception as e:
+        print(f"ERROR: bt_update_connection_status(), {device.name}: {e}")
+        return False
+    
     printDebug(f"Updating connection status...")
+    return True
+async def bt_send_credentials(device):
+    try:
+        printDebug("Sending Credentials... ")
+    
+        cred = f"{CMD_SHARED_WIFI_CREDENTIALS}:{WIFI_SSID}>{WIFI_PASSWORD}>{IP_ADDRESS}"
+        client = bt_get_client(device)
+    
+        printDebug(f"Get Client: {client.name}")
+    
+        if client and client.is_connected:
+            await client.write_gatt_char(CHAR_UUID, cred.encode(), response=True)
+            printDebug("Done\n")
+            return True
 
-    addr = device.address
-    name = device.name if device.name else "Unknown"
-    date_time = datetime.datetime.now().strftime("%d:%m:%Y %H:%M:%S")
+    except Exception as e:
+        print(f"ERROR: bt_send_credentials(), {device.name}: {e}")
+        return False
+       
+def bt_get_name():
+    printDebug("Getting Bluetooth Name... ")
+    try:
+        result = subprocess.run(
+            ["bluetoothctl", "show"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
 
-    # Check if device is already in list
-    existing = next((x for x in lstBtConnectedDevices if x[CONNECT_ADR] == addr), None)
+        for line in result.stdout.splitlines():
+            if "Alias:" in line:
+                # Extract the name after 'Alias:'
+                name = line.split("Alias:")[1].strip()
+                printDebug(f"My Name: {name}")
+                return name
+        printDebug("Bluetooth name not found")
+        return ""
 
-    # Add new device if not found
-    if existing is None:
-        existing = {
-            CONNECT_ADR: addr,
-            CONNECT_NAME: name,
-            CONNECT_STATUS: False,
-            CONNECT_TIME: date_time
-        }
-        lstBtConnectedDevices.append(existing)
-        printDebug(f"New Device Found: {name} ({addr})")
+    except Exception as e:
+        print(f"Error: bt_get_name(), {e}")
+        return ""
+def bt_get_client(device):
+    printDebug(f"Getting BT Client for: {device.name} ({device.address}) ")
+
+    if device.address in BT_CLIENTS and BT_CLIENTS[device.address].is_connected:
+        printDebug(f"Already connected: {device.name} ({device.address}) ")
+        return  BT_CLIENTS.get(device.address)
     else:
-        existing[CONNECT_STATUS] = False
-
-    client = bt_get_client(device)
-
-    if client and client.is_connected:
-        printDebug(f"Update Connection status: true")
-        existing[CONNECT_STATUS] = True
-        existing[CONNECT_TIME] = date_time
+        print(f"No BT Client found for: {device.name} ({device.address}) ")
+        return None
 async def bt_notification_handler(sender, data):
     printDebug(f"[notify] {sender}: {data}")
-async def bt_send_credentials(device):
-    printDebug("Sending Credentials... ")
-    
-    ip = get_local_ip_address()
-    
-    cred = f"{CMD_SHARED_WIFI_CREDENTIALS}:{WIFI_SSID}>{WIFI_PASSWORD}>{ip}"
-    client = bt_get_client(device)
-    
-    printDebug(f"Get Client: {client.name}")
-    
-    if client and client.is_connected:
-        await client.write_gatt_char(CHAR_UUID, cred.encode(), response=True)
-        printDebug("Done\n")
-
-# MQTT
-def mqtt_on_connect(client, userdata, flags, reason_code, properties):
-    print("Connected to MQTT broker:", reason_code)
-    client.subscribe(MqttService.MQTT_TOPIC_REQUEST)
-    print(f"MQTT Subscribed: {MqttService.MQTT_TOPIC_REQUEST}")
-def mqtt_on_message(client, userdata, msg):
-    print(f"MQTT Request received on topic {msg.topic}")
-    print("Payload:", msg.payload)
-
-    try:
-        payload = json.loads(msg.payload.decode())
-        client_id = payload.get("clientId", "default")
-    except:
-        print(f"ERROR: mqtt_on_message(), Invalid JSON: {msg.payload}")
-        return
-
-    response_topic = f"{MqttService.MQTT_TOPIC_RESPONSE}/{client_id}"
-    printDebug(f"Sending data to: {response_topic}")
-
-    client.publish(response_topic, json.dumps(settings))
 
 async def main():
     global WIFI_SSID
     global WIFI_PASSWORD
     global BT_NAME
+    global IP_ADDRESS
 
     BT_NAME = bt_get_name()
     print(f"\nBluetooth Name: {BT_NAME}")
 
-    ipAddress = get_local_ip_address()
-    print(f"Local IP Address: {ipAddress}")
+    IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
+    print(f"Local IP Address: {IP_ADDRESS}")
 
-    fire_ip = fire_read_ip_adr(BT_NAME)
-    if(ipAddress != fire_ip):
-        fire_write_ip_adr(BT_NAME, ipAddress)
-        print(f"Update Firestore IP: {ipAddress}")
+    if(sync_ip_address(IP_ADDRESS)):
+        print(f"Update Firestore IP: {IP_ADDRESS}")
 
     WIFI_SSID,WIFI_PASSWORD = WifiCredentials.get_credentials(new_creds=args.new_creds, encrypt=args.encrypt)
     print(f"SSID: {WIFI_SSID}")
@@ -401,14 +400,9 @@ async def main():
 
     mqtt_service = MqttService.MqttServer(
         client_id = BT_NAME,
-        broker_ip = ipAddress,
+        broker_ip = IP_ADDRESS,
     ) 
-    
-    #mqtt_client.on_connect = mqtt_on_connect
-    #mqtt_client.on_message = mqtt_on_message
-
     await mqtt_service.connect()
-    #mqtt_client.loop_forever()
     
     # Bluetooth Discovery Task
     asyncio.create_task(bt_discover())
