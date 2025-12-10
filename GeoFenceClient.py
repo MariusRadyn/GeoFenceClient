@@ -14,6 +14,7 @@ from bleak import BleakScanner, BleakClient
 import re
 import MqttService
 import WifiCredentials
+from WifiCredentials import parser as wifi_parser
 import os   
 import datetime
 import paho.mqtt.client as mqtt
@@ -21,17 +22,18 @@ import paho.mqtt.client as mqtt
 # Create Arguments
 # --new-creds : Create new wifi credentials
 # --encrypt   : Encrypt wifi credentials
-parser = argparse.ArgumentParser(description="WiFi Credentials Manager")
+# --force-wifi : ignore Ehterner Connection, Use
+parser = argparse.ArgumentParser(description="GeoFence Client")
 parser.add_argument(
-    "--new-creds", 
+    "--force-wifi", 
     action="store_true",  # This makes it a boolean flag
-    help="Create new wifi credentials"
+    help="Ignore Ethernet LAN, use Wifi connection"
 )
-parser.add_argument(
-    "--encrypt", 
-    action="store_true",  # This makes it a boolean flag
-    help="Encrypt wifi credentials"
-)
+
+# Include wifi_parser arguments
+for action in wifi_parser._actions:
+    parser._add_action(action)
+
 args = parser.parse_args()
 
 
@@ -64,7 +66,7 @@ CONNECT_TIME =  "last_seen"
 CMD_SHARED_WIFI_CREDENTIALS = "wificred" # Format: wificred:ssid>password>ipAdress
 
 # Firestore
-TARGET_PREFIX = "geoserver"
+TARGET_PREFIX = "iOT"
 FIRE_IP_ADR = "IPAdress"
 FIRE_IP_LAST_CON = "LastConnected"
 FIRE_COLLECT_CLIENTS = "clients"
@@ -75,7 +77,24 @@ dbFire = firestore.client()
 # Debug
 PRINT_DEBUG_ENABLED = False
 
-# Methodes
+# Methods
+def checkWifiConnection():
+    try:
+        # Get IP address for the specified interface
+        result = subprocess.check_output(
+            ["iwgetid", "wlan0", "--raw"],
+            stderr=subprocess.DEVNULL
+        )
+        
+        ssid = result.decode().strip()  
+        if ssid:
+            printDebug(f"WIFI Connected: {ssid}")
+        else:
+            printDebug("No WIFI Connection")
+
+    except subprocess.CalledProcessError as e:
+        print(f"Error: checkWifiConnection {e}")
+    return ssid 
 def printDebug(msg):
     if PRINT_DEBUG_ENABLED:
         print(msg)
@@ -102,7 +121,7 @@ def sync_ip_address(ipLocal):
 
     if(ipFire != ipLocal):
         printDebug(f"Update IP Address Firestore: {ipFire} -> {ipLocal}"   )
-        fire_write_ip_adr(IP_ADDRESS, BT_NAME)
+        fire_write_ip_adr(BT_NAME,IP_ADDRESS)
         return True
     return False  
 def get_local_ip_address(interface = INTERFACE_ETH):
@@ -222,23 +241,26 @@ async def bt_discover():
         devices = await BleakScanner.discover(timeout=3.0)
         targets = [
             d for d in devices
-            if d.name and d.name.lower().startswith(TARGET_PREFIX.lower())
+            if d.name and d.name.startswith(TARGET_PREFIX)
         ]
        
         # Connect
         if not targets:
             if(showMsg):
-                print("No iOT devices found.\n")
-
+                showMsg = False
+                
                 for dev in lstBtConnectedDevices:
                     dev['connected'] = False
-
-                showMsg = False
+                
+                print("BT: No New iOT devices found.\n")
+                
         else:
             showMsg = True
-            print(f"Found {len(targets)} iOT devices")
-
-             # track which devices were seen
+            print(f"BT: Found {len(targets)} iOT devices")
+            for dev in targets:
+                print(f"{dev.name}")
+             
+            # track which devices were seen
             seen_addresses = [d.address for d in targets]
 
             # mark unseen devices offline
@@ -253,7 +275,7 @@ async def bt_discover():
 
         printDebug(f"BT Connected Status: {lstBtConnectedDevices}")
                     
-        await asyncio.sleep(10)   # yield
+        await asyncio.sleep(10)   # yield 10s
 async def bt_connect(device):
     global BT_CLIENTS
     address = device.address
@@ -343,8 +365,7 @@ async def bt_send_credentials(device):
 
     except Exception as e:
         print(f"ERROR: bt_send_credentials(), {device.name}: {e}")
-        return False
-       
+        return False    
 def bt_get_name():
     printDebug("Getting Bluetooth Name... ")
     try:
@@ -384,31 +405,68 @@ async def main():
     global WIFI_PASSWORD
     global BT_NAME
     global IP_ADDRESS
+    wifiConnected = False
+    casePtr = 0
 
-    BT_NAME = bt_get_name()
-    print(f"\nBluetooth Name: {BT_NAME}")
-
-    IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
-    print(f"Local IP Address: {IP_ADDRESS}")
-
-    if(sync_ip_address(IP_ADDRESS)):
-        print(f"Update Firestore IP: {IP_ADDRESS}")
-
-    WIFI_SSID,WIFI_PASSWORD = WifiCredentials.get_credentials(new_creds=args.new_creds, encrypt=args.encrypt)
-    print(f"SSID: {WIFI_SSID}")
-    print(f"Password: {WIFI_PASSWORD}") 
-
-    mqtt_service = MqttService.MqttServer(
-        client_id = BT_NAME,
-        broker_ip = IP_ADDRESS,
-    ) 
-    await mqtt_service.connect()
-    
-    # Bluetooth Discovery Task
-    asyncio.create_task(bt_discover())
-    
     while True:
-        await asyncio.sleep(10)
+        match casePtr:
+
+            # Get Unit Name
+            case 0:
+                BT_NAME = bt_get_name()
+                print(f"\nBluetooth Name: {BT_NAME}")
+                casePtr+=1
+            
+            # Connect LAN / Wifi
+            case 1:
+                if(args.force_wifi):
+                   IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
+                   print(f"WIFI IP Address: {IP_ADDRESS}")
+
+                   wifiname = checkWifiConnection()
+                   if(wifiname):
+                       wifiConnected = True
+                       print(f"WIFI Connected: {wifiname}")
+                else:
+                   IP_ADDRESS = get_local_ip_address(INTERFACE_ETH)
+                   print(f"LAN IP Address: {IP_ADDRESS}")
+                    
+                casePtr+=1
+            
+            # Save IP to Firestore
+            case 2:
+                if(sync_ip_address(IP_ADDRESS)):
+                    print(f"Update Firestore IP: {IP_ADDRESS}")
+                casePtr+=1
+            
+            # Get Wifi Credenitials
+            case 3:
+                WIFI_SSID,WIFI_PASSWORD = WifiCredentials.get_credentials(new_creds=args.new_creds, encrypt=args.encrypt)
+                print(f"SSID: {WIFI_SSID}")
+                print(f"Password: {WIFI_PASSWORD}") 
+                casePtr+=1
+
+            # Discover Bluetooth iOT Devices
+            # Send Wifi Credentials
+            case 4:
+                asyncio.create_task(bt_discover())
+                casePtr+=1
+
+            # Start MQTT Service
+            case 5:
+                mqtt_broker = MqttService.MqttServer(
+                    client_id = BT_NAME,
+                    broker_ip = IP_ADDRESS,
+                ) 
+                await mqtt_broker.connect()
+                casePtr+=1
+   
+            case 6:
+                await asyncio.sleep(0.01)
+
+            case _:
+                await asyncio.sleep(10)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

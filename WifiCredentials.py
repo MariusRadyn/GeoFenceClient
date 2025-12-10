@@ -8,7 +8,7 @@ import argparse
 # Create Arguments
 # --new-creds : Create new wifi credentials
 # --encrypt   : Encrypt wifi credentials
-parser = argparse.ArgumentParser(description="WiFi Credentials Manager")
+parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument(
     "--new-creds", 
     action="store_true",  # This makes it a boolean flag
@@ -19,7 +19,7 @@ parser.add_argument(
     action="store_true",  # This makes it a boolean flag
     help="Encrypt wifi credentials"
 )
-args = parser.parse_args()
+#args = parser.parse_args()
 
 # Variables
 SECURE_DIR = os.path.expanduser("~/.secure")

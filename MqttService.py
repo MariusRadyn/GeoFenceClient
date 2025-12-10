@@ -1,6 +1,10 @@
 import json
 import time
 import paho.mqtt.client as mqtt
+from paho.mqtt.properties import Properties
+from paho.mqtt.packettypes import PacketTypes
+
+#client.connect("broker_ip", 1883, properties=props)
 
 # IMPORTANT:
 # Use the PI's IP address here, not "0.0.0.0"
@@ -36,7 +40,7 @@ class MqttServer:
             client_id = self.client_id, 
             protocol=mqtt.MQTTv5
             )
-
+        
         # Bind callbacks
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
@@ -47,8 +51,21 @@ class MqttServer:
     # -----------------------------
     async def connect(self):
         print(f"MQTT Connecting {self.broker_ip}:{self.port} ... ")
-        self.client.connect(self.broker_ip, self.port)
+
+        props = Properties(PacketTypes.CONNECT)
+        props.SessionExpiryInterval = 60  # in seconds, 0 = never store, max ~4B
+
+        self.client.connect(
+            host=self.broker_ip,
+            port=self.port,
+            keepalive=30,
+            clean_start = mqtt.MQTT_CLEAN_START_FIRST_ONLY,  # or mqtt.MQTT_CLEAN_START_TRUE
+            properties=props
+        )
         self.client.loop_start()
+    
+    def loop(self):
+        self.client.loop()
 
     # -----------------------------
     # Callbacks
@@ -59,9 +76,7 @@ class MqttServer:
         
         client.subscribe(MQTT_TOPIC_REQ)
         print(f"MQTT Subscribed: {MQTT_TOPIC_REQ}")
-
     def on_message(self, client, userdata, msg):
-        #print(f"MQTT RX on topic: {msg.topic}")
         print(f"MQTT RX: {msg.payload.decode()} {msg.topic}")
 
         try:
@@ -84,7 +99,6 @@ class MqttServer:
         response_topic = f"{MQTT_TOPIC_RESPONSE}/{requester_id}"
         client.publish(response_topic, json.dumps(self.settings))
         print(f"MQTT TX: {response_topic}")
-        
     def on_disconnect(self, client, userdata, rc, properties=None):
         print(f"MQTT Disconnected: {rc}")
         showMsg = True
