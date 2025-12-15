@@ -12,9 +12,12 @@ BROKER = "192.168.1.114"        # <--- CHANGE TO YOUR RPI IP
 PORT = 1883
 
 MQTT_NAME = "GeoBrokerMqtt"
-MQTT_TOPIC_REQ = "device/settings/request"
-MQTT_TOPIC_RESPONSE = "device/settings/response"
-MQTT_TOPIC_CRED ="device/settings/credentials"
+MQTT_TOPIC_FROM_IOT = "mqtt/from/iot"
+MQTT_TOPIC_TO_IOT = "mqtt/to/iot"
+MQTT_TOPIC_FROM_ANDROID = "mqtt/from/android"
+MQTT_TOPIC_TO_ANDROID = "mqtt/to/android"
+MQTT_TOPIC_ANDROID = "mqtt/android"
+MQTT_TOPIC_CRED ="mqtt/credentials"
 
 class MqttServer:
     def __init__(
@@ -74,31 +77,37 @@ class MqttServer:
         #print(f"[{self.client_id}] Connected to broker: {reason_code}")
         print(f"MQTT Connected: {reason_code}")
         
-        client.subscribe(MQTT_TOPIC_REQ)
-        print(f"MQTT Subscribed: {MQTT_TOPIC_REQ}")
+        client.subscribe(MQTT_TOPIC_FROM_IOT)
+        print(f"MQTT Subscribed: {MQTT_TOPIC_FROM_IOT}")
+ 
+        client.subscribe(MQTT_TOPIC_FROM_ANDROID)
+        print(f"MQTT Subscribed: {MQTT_TOPIC_FROM_ANDROID}")
     def on_message(self, client, userdata, msg):
         print(f"MQTT RX: {msg.payload.decode()} {msg.topic}")
 
         try:
-            # JSON Recieved
-            payload = json.loads(msg.payload.decode())
-            requester_id = payload.get("clientId", "default")
+            # From Android
+            if(msg.topic == MQTT_TOPIC_FROM_ANDROID):
+                response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{requester_id}"
+                client.publish(response_topic, json.dumps(self.settings))
+                print(f"MQTT TX: {self.settings} {response_topic}")
         
-            # Publish settings to response topic
-            response_topic = f"{MQTT_TOPIC_RESPONSE}/{requester_id}"
-            client.publish(response_topic, json.dumps(self.settings))
-            print(f"MQTT TX SETTINGS: {self.settings} {response_topic}")
+            # From IOT
+            if(msg.topic == MQTT_TOPIC_FROM_IOT):
+                # JSON Recieved
+                payload = json.loads(msg.payload.decode())
+                requester_id = payload.get("clientId", "default")
+            
+                # Publish settings to response topic
+                response_topic = f"{MQTT_TOPIC_TO_IOT}/{requester_id}"
+                client.publish(response_topic, json.dumps(self.settings))
+                print(f"MQTT TX: {self.settings} {response_topic}")
 
         except json.JSONDecodeError:
             # String Recieved
             
             #print(f"Invalid JSON received {self.client_id}")
             return
-
-        # Publish settings to response topic
-        response_topic = f"{MQTT_TOPIC_RESPONSE}/{requester_id}"
-        client.publish(response_topic, json.dumps(self.settings))
-        print(f"MQTT TX: {response_topic}")
     def on_disconnect(self, client, userdata, rc, properties=None):
         print(f"MQTT Disconnected: {rc}")
         showMsg = True
