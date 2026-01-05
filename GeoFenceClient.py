@@ -458,7 +458,7 @@ async def main():
                     client_id = BT_NAME,
                     broker_ip = IP_ADDRESS,
                 ) 
-                await mqtt_broker.connect()
+                await mqtt_broker.connectMqtt()
                 casePtr+=1
    
             case 6:
