@@ -20,12 +20,12 @@ import datetime
 import paho.mqtt.client as mqtt
 
 # Create Arguments
-# --new-creds : Create new wifi credentials
+# --newcreds : Create new wifi credentials
 # --encrypt   : Encrypt wifi credentials
-# --force-wifi : ignore Ehterner Connection, Use
+# --wifi : ignore Ethernet Connection, Use
 parser = argparse.ArgumentParser(description="GeoFence Client")
 parser.add_argument(
-    "--force-wifi", 
+    "--wifi", 
     action="store_true",  # This makes it a boolean flag
     help="Ignore Ethernet LAN, use Wifi connection"
 )
@@ -419,7 +419,7 @@ async def main():
             
             # Connect LAN / Wifi
             case 1:
-                if(args.force_wifi):
+                if(args.wifi):
                    IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
                    print(f"WIFI IP Address: {IP_ADDRESS}")
 
@@ -441,7 +441,7 @@ async def main():
             
             # Get Wifi Credenitials
             case 3:
-                WIFI_SSID,WIFI_PASSWORD = WifiCredentials.get_credentials(new_creds=args.new_creds, encrypt=args.encrypt)
+                WIFI_SSID,WIFI_PASSWORD = WifiCredentials.get_credentials(new_creds=args.newcreds, encrypt=args.encrypt)
                 print(f"SSID: {WIFI_SSID}")
                 print(f"Password: {WIFI_PASSWORD}") 
                 casePtr+=1

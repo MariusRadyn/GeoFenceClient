@@ -21,22 +21,33 @@ MQTT_TOPIC_ANDROID = "mqtt/android"
 MQTT_TOPIC_CRED ="mqtt/credentials"
 
 # MQTT JSON
-MQTT_JSON_DEVICE_ID = "device_id"
+MQTT_JSON_FROM_DEVICE_ID = "from_device_id"
+MQTT_JSON_TO_DEVICE_ID = "to_device_id"
 MQTT_JSON_TOPIC = "topic"
 MQTT_JSON_PAYLOAD = "payload"
 MQTT_JSON_CMD = "command"
+MQTT_JSON_WHEEL_DISTANCE = "wheel_distance"
+
+# JSON Settings
+SETTING_JSON_TICKS_PER_M = "ticksPerM"
+SETTING_JSON_IOT_TYPE = "iotType"
+#SETTING_JSON_MON_ID = "monId"
+
 
 #MQTT Commands
 MQTT_CMD_REQ_MONITOR = "#REQ_MONITOR"
 MQTT_CMD_FOUND_MONITOR = "#FOUND_MONITOR"
+MQTT_CMD_CONNECT_MONITOR = "#CONNECT_MONITOR"
+MQTT_CMD_DISCONNECT_MONITOR = "#DISCONNECT_MONITOR"
 MQTT_CMD_SETTINGS = "#REQ_SETTINGS"
 MQTT_CMD_ACK = "#ACK"
 MQTT_CMD_DEVICE_ID = "#DEVICE_ID"
+MQTT_CMD_MONITOR_DATA = "#MONITOR_DATA"
 
-recievedMonitor = False
-showAdvertiseMsg = True
-android_id = ''
-iot_id = ''
+#recievedMonitor = False
+#showAdvertiseMsg = True
+#android_id = ''
+#iot_id = ''
 
 #Debug
 PRINT_MQTT_COMMS = True
@@ -89,16 +100,25 @@ class MqttServer:
             properties=props
         )
         self.client.loop_start()
-    
+    def decode_payload(self, payload):
+        if isinstance(payload, dict):
+            self.printMqttComms(f"DECODE: JSON")
+            return payload
+        if isinstance(payload, str):
+            try:
+                self.printMqttComms(f"DECODE: STRING")
+                return json.loads(payload)
+            except json.JSONDecodeError:
+                return payload
+        return payload
+
     def loop(self):
         self.client.loop()
-
     def printMqttComms(self, msg):
         global PRINT_MQTT_COMMS
 
         if(PRINT_MQTT_COMMS == True): 
             print(msg)
-
     def printMqttInfo(self, msg):
         global PRINT_MQTT_INFO
 
@@ -118,120 +138,198 @@ class MqttServer:
         client.subscribe(MQTT_TOPIC_FROM_ANDROID)
         self.printMqttInfo(f"MQTT Subscribed: {MQTT_TOPIC_FROM_ANDROID}")
     def on_message(self, client, userdata, msg):
-        global recievedMonitor
-        global showAdvertiseMsg
-        global android_id
-        global iot_id
+        #global recievedMonitor
+        #global showAdvertiseMsg
+        #global android_id
+        #global iot_id
         
         self.printMqttComms(f"MQTT RX: {msg.payload.decode()}")
 
         data = json.loads(msg.payload.decode())
-        requester_id = data.get(MQTT_JSON_DEVICE_ID, "default")
-        payload = data.get(MQTT_JSON_PAYLOAD, "default")
-        command = data.get(MQTT_JSON_CMD, "default")
+        from_id = data.get(MQTT_JSON_FROM_DEVICE_ID, "")
+        to_id = data.get(MQTT_JSON_TO_DEVICE_ID, "")
+        payload = data.get(MQTT_JSON_PAYLOAD, "")
+        command = data.get(MQTT_JSON_CMD, "")
         
         try:
             # From Android
             if(msg.topic == MQTT_TOPIC_FROM_ANDROID):
-                android_id = requester_id
+                #android_id = requester_id
 
-                # Scan Monitor
+                # Scan Monitor (Broadcast)
                 if(command == MQTT_CMD_REQ_MONITOR):
-                    #Pass message to IOT
-                    
-                    #if (recievedMonitor == False):
-                    #    self.printMqttInfo(f"Android Scan Monitor .... Found: None")
-                    #else:
-
-                    # Broadcast to ALL IOT
-                    # Only IOT that has Pair button pressed will respond
-                    # Make sure ony 1 IOT is in discover mode at a time
                     response_topic = f"{MQTT_TOPIC_TO_IOT}"
                     
-                    # Build JSON payload
+                    # Broadcast to ALL IOT
+                    # Only IOT that has Pair button pressed will respond
+                    # Make sure only 1 IOT is in discover mode at a time
+                    
                     txPayload = {
-                        MQTT_JSON_DEVICE_ID: requester_id,
+                        MQTT_JSON_FROM_DEVICE_ID: from_id,
+                        MQTT_JSON_TO_DEVICE_ID: "",         # Broadcast
                         MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: iot_id,
-                        MQTT_JSON_CMD:MQTT_CMD_REQ_MONITOR
+                        MQTT_JSON_PAYLOAD: "",
+                        MQTT_JSON_CMD : MQTT_CMD_REQ_MONITOR
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
-                    #self.printMqttInfo(f"Android Scan Monitor .... Found: {monitorName}")
-                    self.printMqttInfo(f"Android to IOT: Request Monitors")
             
                 # Found Monitor
                 if(command == MQTT_CMD_FOUND_MONITOR):
-                    recievedMonitor == False   
-                    showAdvertiseMsg = True
-                    iot_id = payload    
-                    response_topic = f"{MQTT_TOPIC_TO_IOT}"
+                    #recievedMonitor = False   
+                    #showAdvertiseMsg = True  
+                    response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
                     
                     # Build JSON payload
                     txPayload = {
-                        MQTT_JSON_DEVICE_ID: requester_id,
+                        MQTT_JSON_FROM_DEVICE_ID: from_id,
+                        MQTT_JSON_TO_DEVICE_ID: to_id,
                         MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: iot_id,
+                        MQTT_JSON_PAYLOAD: to_id,
                         MQTT_JSON_CMD:MQTT_CMD_FOUND_MONITOR
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
-                    self.printMqttInfo(f"Android to IOT: Found Monitor: {iot_id}")
                     
                 # Request Settings
                 if(command == MQTT_CMD_SETTINGS):
-                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{requester_id}"
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
                     client.publish(response_topic, json.dumps(self.settings))
                     self.printMqttComms(f"MQTT TX: {self.settings} {response_topic}")
         
+                # Connect to Monitor
+                if(command == MQTT_CMD_CONNECT_MONITOR):
+                    
+                    #iot_id = payload[SETTING_JSON_MON_ID]
+                    iot_type = payload[SETTING_JSON_IOT_TYPE]
+                    ticks = payload[SETTING_JSON_TICKS_PER_M]
+
+                    settings = {
+                        SETTING_JSON_IOT_TYPE: iot_type,
+                        SETTING_JSON_TICKS_PER_M: ticks,
+                    }
+
+                    response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
+                    
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: from_id,
+                        MQTT_JSON_TO_DEVICE_ID: to_id,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_PAYLOAD: settings,
+                        MQTT_JSON_CMD:MQTT_CMD_CONNECT_MONITOR
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+
+                # DisConnect to Monitor
+                if(command == MQTT_CMD_DISCONNECT_MONITOR): 
+                    
+                    response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
+                    
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: from_id,
+                        MQTT_JSON_TO_DEVICE_ID: to_id,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_CMD:MQTT_CMD_DISCONNECT_MONITOR
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+
             # From IOT
             if(msg.topic == MQTT_TOPIC_FROM_IOT):
-                iot_id = requester_id
+                #iot_id = requester_id
 
                 # Rx Device ID (Subscribe Private Topic)
                 if(command == MQTT_CMD_DEVICE_ID):
-                    topic = f"{MQTT_TOPIC_FROM_IOT}/{requester_id}"
+                    topic = f"{MQTT_TOPIC_FROM_IOT}/{from_id}"
                     client.subscribe(topic)
                     self.printMqttInfo(f"Auto Subscribe: {topic}")
 
-                # Rx Settings 
+                # IOT Settings 
                 if(command == MQTT_CMD_SETTINGS):
                     self.printMqttComms(f"MQTT TX: {self.settings} {response_topic}")
 
-                # Rx Monitor ID 
+                # Pair - Scan Monitor ID 
                 if(command == MQTT_CMD_REQ_MONITOR):
                     recievedMonitor = True
-                    iot_id = payload
-                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{android_id}"
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
                     
-                    # Build JSON payload
                     txPayload = {
-                        MQTT_JSON_DEVICE_ID: requester_id,
+                        MQTT_JSON_FROM_DEVICE_ID: from_id,
                         MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: iot_id,
+                        MQTT_JSON_PAYLOAD: "",
                         MQTT_JSON_CMD:MQTT_CMD_REQ_MONITOR
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
-                    self.printMqttInfo(f"IOT to Android: iOT ID: {iot_id}")
                   
+                    # if(showAdvertiseMsg):
+                    #     showAdvertiseMsg = False
+                    #     self.printMqttInfo(f"iOT Advertising: {iot_id}")
                 
-                    if(showAdvertiseMsg):
-                        showAdvertiseMsg = False
-                        self.printMqttInfo(f"iOT Advertising: {iot_id}")
-                
-                # iOT Monitor Found 
-                if(command == MQTT_CMD_FOUND_MONITOR):                 
-                    iot_id = payload
-                    showAdvertiseMsg = True
-                    self.printMqttInfo(f"iOT Monitor Found: {iot_id}")
+                # ACK 
+                if(command == MQTT_CMD_ACK):                     
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
+                     
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: from_id,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_PAYLOAD: "",
+                        MQTT_JSON_CMD:MQTT_CMD_ACK
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
      
-        except json.JSONDecodeError:
-            # String Recieved
-            
+                # IOT Data 
+                if(command == MQTT_CMD_MONITOR_DATA):                 
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
+                     
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: from_id,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_PAYLOAD: payload,
+                        MQTT_JSON_CMD:MQTT_CMD_MONITOR_DATA
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+
+                # Connect  (IOT to Android)
+                if(command == MQTT_CMD_CONNECT_MONITOR):                 
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
+                     
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: from_id,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_PAYLOAD: "",
+                        MQTT_JSON_CMD:MQTT_CMD_CONNECT_MONITOR
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+
+                # DisConnect  (IOT to Android)
+                if(command == MQTT_CMD_DISCONNECT_MONITOR):                 
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
+                     
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: from_id,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_PAYLOAD: "",
+                        MQTT_JSON_CMD:MQTT_CMD_DISCONNECT_MONITOR
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+
+
+        except json.JSONDecodeError:  
             #print(f"Invalid JSON received {self.client_id}")
             return
     def on_disconnect(self, client, userdata, rc, properties=None):

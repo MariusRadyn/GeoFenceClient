@@ -10,7 +10,7 @@ import argparse
 # --encrypt   : Encrypt wifi credentials
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument(
-    "--new-creds", 
+    "--newcreds", 
     action="store_true",  # This makes it a boolean flag
     help="Create new wifi credentials"
 )
@@ -151,7 +151,7 @@ def get_credentials(new_creds =False, encrypt=False):
     return creds['ssid'], creds['password']
 
 def main():
-    get_credentials(new_creds=args.new_creds, encrypt=args.encrypt)
+    get_credentials(new_creds=args.newcreds, encrypt=args.encrypt)
 
 if __name__ == "__main__":
     main()
