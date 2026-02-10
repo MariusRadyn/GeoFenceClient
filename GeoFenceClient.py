@@ -228,6 +228,17 @@ def fire_read_ip_adr(bt_name=""):
         print(f"ERROR: fire_read_ip_adr(), reading from Firestore: {e}") 
 
     return "0.0.0.0"
+def fire_write_measurements(bt_name="",ip_address=""):  
+    try:
+        doc_ref = dbFire.collection(FIRE_COLLECT_CLIENTS).document(bt_name)
+        doc_ref.set({
+            FIRE_IP_ADR: ip_address,
+            FIRE_IP_LAST_CON: datetime.datetime.now().strftime("%d:%m:%Y %H:%M:%S")
+        }, merge=True)
+        
+        print(f"Firestore Write: {bt_name}@{ip_address}")
+    except Exception as e:
+        print(f"ERROR: fire_write_ip_adr(), writing to Firestore: {e}")
 
 # Bluetooth Methods
 async def bt_discover():

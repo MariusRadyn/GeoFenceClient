@@ -21,11 +21,11 @@ MQTT_TOPIC_ANDROID = "mqtt/android"
 MQTT_TOPIC_CRED ="mqtt/credentials"
 
 # MQTT JSON
-MQTT_JSON_FROM_DEVICE_ID = "from_device_id"
-MQTT_JSON_TO_DEVICE_ID = "to_device_id"
+MQTT_JSON_FROM_DEVICE_ID = "from"
+MQTT_JSON_TO_DEVICE_ID = "to"
 MQTT_JSON_TOPIC = "topic"
 MQTT_JSON_PAYLOAD = "payload"
-MQTT_JSON_CMD = "command"
+MQTT_JSON_CMD = "cmd"
 MQTT_JSON_WHEEL_DISTANCE = "wheel_distance"
 
 # JSON Settings
@@ -43,11 +43,7 @@ MQTT_CMD_SETTINGS = "#REQ_SETTINGS"
 MQTT_CMD_ACK = "#ACK"
 MQTT_CMD_DEVICE_ID = "#DEVICE_ID"
 MQTT_CMD_MONITOR_DATA = "#MONITOR_DATA"
-
-#recievedMonitor = False
-#showAdvertiseMsg = True
-#android_id = ''
-#iot_id = ''
+MQTT_CMD_MEASURE_DATA = "#MEASURE_DATA"
 
 #Debug
 PRINT_MQTT_COMMS = True
@@ -295,6 +291,20 @@ class MqttServer:
                         MQTT_JSON_TOPIC: response_topic,
                         MQTT_JSON_PAYLOAD: payload,
                         MQTT_JSON_CMD:MQTT_CMD_MONITOR_DATA
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+
+                # Measurement Data (Push to Cloud)
+                if(command == MQTT_CMD_MEASURE_DATA):                 
+                    response_topic = f"{MQTT_TOPIC_TO_IOT}/{from_id}"
+                     
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: from_id,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_PAYLOAD: payload,
+                        MQTT_JSON_CMD:MQTT_CMD_ACK
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
