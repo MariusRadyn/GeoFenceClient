@@ -16,8 +16,10 @@ import MqttService
 import WifiCredentials
 from WifiCredentials import parser as wifi_parser
 import os   
-import datetime
-import paho.mqtt.client as mqtt
+from datetime import datetime, timezone
+from queue import Empty
+#import paho.mqtt.client as mqtt
+
 
 # Create Arguments
 # --newcreds : Create new wifi credentials
@@ -35,7 +37,6 @@ for action in wifi_parser._actions:
     parser._add_action(action)
 
 args = parser.parse_args()
-
 
 # Settings
 home_dir = os.path.expanduser("~")
@@ -65,11 +66,39 @@ CONNECT_TIME =  "last_seen"
 # Commands
 CMD_SHARED_WIFI_CREDENTIALS = "wificred" # Format: wificred:ssid>password>ipAdress
 
+# iot Type
+IOT_TYPE_VEHICLE = "Vehicle"
+IOT_TYPE_MOBILE_MACHINE = "Mobile Machine"
+IOT_TYPE_STATIONARY_MACHINE = "Stationary Machine"
+IOT_TYPE_WHEEL = "Distance Wheel"
+
+# Payload Settings
+JSON_SET_OPERATOR = "operator"
+JSON_SET_SUPERVISOR = "supervisor"
+JSON_SET_DISTANCE = "distance"
+JSON_SET_LINES = "lines"  
+JSON_SET_TIMESTAMP = "timestamp"  
+JSON_USER_ID = "userId"  
+JSON_MONITOR_DOC_ID = "docId"  
+JSON_IOT_TYPE = "iotType" 
+
 # Firestore
 TARGET_PREFIX = "iOT"
-FIRE_IP_ADR = "IPAdress"
-FIRE_IP_LAST_CON = "LastConnected"
 FIRE_COLLECT_CLIENTS = "clients"
+FIRE_COLLECT_USERS = "users"
+FIRE_COLLECT_MONITORS = "monitors"
+FIRE_COLLECT_MONITOR_DATA = "data"
+
+FIRE_SET_IP_ADR = "IPAdress"
+FIRE_SET_IP_LAST_CON = "LastConnected"
+
+# (Firsetore) Distance Wheel
+FIRE_SET_OPERATOR = "operator"
+FIRE_SET_SUPERVISOR = "supervisor"
+FIRE_SET_DISTANCE = "distance"
+FIRE_SET_LINES = "lines"
+FIRE_SET_TIMESTAMP = "timestamp"
+
 cred = credentials.Certificate(os.path.expanduser("~/Secure/ServiceAccountKey.json"))
 firebase_admin.initialize_app(cred)
 dbFire = firestore.client()
@@ -201,8 +230,8 @@ def fire_write_ip_adr(bt_name="",ip_address=""):
     try:
         doc_ref = dbFire.collection(FIRE_COLLECT_CLIENTS).document(bt_name)
         doc_ref.set({
-            FIRE_IP_ADR: ip_address,
-            FIRE_IP_LAST_CON: datetime.datetime.now().strftime("%d:%m:%Y %H:%M:%S")
+            FIRE_SET_IP_ADR: ip_address,
+            FIRE_SET_IP_LAST_CON: datetime.datetime.now().strftime("%d:%m:%Y %H:%M:%S")
         }, merge=True)
         
         print(f"Firestore Write: {bt_name}@{ip_address}")
@@ -218,7 +247,7 @@ def fire_read_ip_adr(bt_name=""):
         doc = doc_ref.get()
 
         if doc.exists:
-            firestore_ip = doc.to_dict().get(FIRE_IP_ADR, "0.0.0.0")
+            firestore_ip = doc.to_dict().get(FIRE_SET_IP_ADR, "0.0.0.0")
             printDebug(f"Firestore IP: {firestore_ip}")
             return firestore_ip
         else:
@@ -228,15 +257,34 @@ def fire_read_ip_adr(bt_name=""):
         print(f"ERROR: fire_read_ip_adr(), reading from Firestore: {e}") 
 
     return "0.0.0.0"
-def fire_write_measurements(bt_name="",ip_address=""):  
+def fire_write_iot_data(payload):  
     try:
-        doc_ref = dbFire.collection(FIRE_COLLECT_CLIENTS).document(bt_name)
-        doc_ref.set({
-            FIRE_IP_ADR: ip_address,
-            FIRE_IP_LAST_CON: datetime.datetime.now().strftime("%d:%m:%Y %H:%M:%S")
-        }, merge=True)
-        
-        print(f"Firestore Write: {bt_name}@{ip_address}")
+        # Time stamp
+        epoch = payload.get("timestamp")  # safe get
+        if epoch is None:
+            print("Warning: timestamp missing, using current UTC time")
+            tStamp = datetime.now(timezone.utc)
+        else:
+            tStamp = datetime.fromtimestamp(epoch, tz=timezone.utc)
+
+        iotType = payload.get(JSON_IOT_TYPE)
+        userId = payload.get(JSON_USER_ID)
+        monId = payload.get(JSON_MONITOR_DOC_ID)
+
+        if(iotType == IOT_TYPE_WHEEL):
+            doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userId)\
+                .collection(FIRE_COLLECT_MONITORS).document(monId)\
+                .collection(FIRE_COLLECT_MONITOR_DATA).document()
+            
+            doc_ref.set({
+                FIRE_SET_DISTANCE: payload.get(JSON_SET_DISTANCE, 0.0),
+                FIRE_SET_OPERATOR: payload.get(JSON_SET_OPERATOR, "none"),
+                FIRE_SET_SUPERVISOR: payload.get(JSON_SET_SUPERVISOR, "none"),
+                FIRE_SET_LINES: payload.get(JSON_SET_LINES, 0),
+                FIRE_SET_TIMESTAMP: tStamp
+            }, merge=True)
+            
+            printDebug(f"Firestore Write: {payload}")
     except Exception as e:
         print(f"ERROR: fire_write_ip_adr(), writing to Firestore: {e}")
 
@@ -471,10 +519,17 @@ async def main():
                 ) 
                 await mqtt_broker.connectMqtt()
                 casePtr+=1
-   
+            
+            # Idle
             case 6:
                 await asyncio.sleep(0.01)
 
+                try:
+                    payload = mqtt_broker.queue.get_nowait()
+                    fire_write_iot_data(payload)
+                except Empty:
+                    pass
+    
             case _:
                 await asyncio.sleep(10)
 

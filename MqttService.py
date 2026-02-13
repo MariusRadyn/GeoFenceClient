@@ -1,5 +1,7 @@
 import json
 import time
+from queue import Queue
+from queue import Full
 import paho.mqtt.client as mqtt
 from paho.mqtt.properties import Properties
 from paho.mqtt.packettypes import PacketTypes
@@ -31,8 +33,8 @@ MQTT_JSON_WHEEL_DISTANCE = "wheel_distance"
 # JSON Settings
 SETTING_JSON_TICKS_PER_M = "ticksPerM"
 SETTING_JSON_IOT_TYPE = "iotType"
-#SETTING_JSON_MON_ID = "monId"
-
+SETTING_JSON_USER_ID = "userId"
+SETTING_JSON_DOC_ID = "docId"
 
 #MQTT Commands
 MQTT_CMD_REQ_MONITOR = "#REQ_MONITOR"
@@ -60,7 +62,8 @@ class MqttServer:
         self.client_id = client_id
         self.broker_ip = broker_ip
         self.port = port
-
+        self.queue = Queue(maxsize=50)
+        
         # Example settings
         self.settings = {
             "volume": 80,
@@ -107,14 +110,13 @@ class MqttServer:
             except json.JSONDecodeError:
                 return payload
         return payload
-
     def loop(self):
         self.client.loop()
     def printMqttComms(self, msg):
         global PRINT_MQTT_COMMS
 
         if(PRINT_MQTT_COMMS == True): 
-            print(msg)
+            print(msg + '\n')
     def printMqttInfo(self, msg):
         global PRINT_MQTT_INFO
 
@@ -134,11 +136,6 @@ class MqttServer:
         client.subscribe(MQTT_TOPIC_FROM_ANDROID)
         self.printMqttInfo(f"MQTT Subscribed: {MQTT_TOPIC_FROM_ANDROID}")
     def on_message(self, client, userdata, msg):
-        #global recievedMonitor
-        #global showAdvertiseMsg
-        #global android_id
-        #global iot_id
-        
         self.printMqttComms(f"MQTT RX: {msg.payload.decode()}")
 
         data = json.loads(msg.payload.decode())
@@ -198,13 +195,16 @@ class MqttServer:
                 # Connect to Monitor
                 if(command == MQTT_CMD_CONNECT_MONITOR):
                     
-                    #iot_id = payload[SETTING_JSON_MON_ID]
                     iot_type = payload[SETTING_JSON_IOT_TYPE]
                     ticks = payload[SETTING_JSON_TICKS_PER_M]
+                    userId = payload[SETTING_JSON_USER_ID]
+                    docId = payload[SETTING_JSON_DOC_ID]
 
                     settings = {
                         SETTING_JSON_IOT_TYPE: iot_type,
                         SETTING_JSON_TICKS_PER_M: ticks,
+                        SETTING_JSON_DOC_ID: docId,
+                        SETTING_JSON_USER_ID: userId,
                     }
 
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
@@ -299,16 +299,22 @@ class MqttServer:
                 # Measurement Data (Push to Cloud)
                 if(command == MQTT_CMD_MEASURE_DATA):                 
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{from_id}"
-                     
+                    
+                    try:
+                        self.queue.put_nowait(payload)
+                    except Full:
+                        self.queue.get_nowait()   # discard oldest
+                        self.queue.put_nowait(payload)
+    
                     txPayload = {
                         MQTT_JSON_FROM_DEVICE_ID: from_id,
                         MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: payload,
-                        MQTT_JSON_CMD:MQTT_CMD_ACK
+                        MQTT_JSON_PAYLOAD: "",
+                        MQTT_JSON_CMD: MQTT_CMD_ACK
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printMqttComms(f"MQTT TX: {txPayload}")
+                    self.printMqttComms(f"MQTT TX: {txPayload}")        
 
                 # Connect  (IOT to Android)
                 if(command == MQTT_CMD_CONNECT_MONITOR):                 
