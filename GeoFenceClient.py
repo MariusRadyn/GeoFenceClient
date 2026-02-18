@@ -78,8 +78,8 @@ JSON_SET_SUPERVISOR = "supervisor"
 JSON_SET_DISTANCE = "distance"
 JSON_SET_LINES = "lines"  
 JSON_SET_TIMESTAMP = "timestamp"  
-JSON_USER_ID = "userId"  
-JSON_MONITOR_DOC_ID = "docId"  
+JSON_USER_DOC_ID = "userDocId"  
+JSON_MONITOR_DOC_ID = "monDocId"  
 JSON_IOT_TYPE = "iotType" 
 JSON_IOT_NAME = "iotName" 
 
@@ -113,7 +113,7 @@ firebase_admin.initialize_app(cred)
 dbFire = firestore.client()
 
 # Debug
-PRINT_DEBUG_ENABLED = False
+PRINT_DEBUG_ENABLED = True
 
 # Methods
 def checkWifiConnection():
@@ -269,7 +269,7 @@ def fire_read_ip_adr(bt_name=""):
 def fire_write_iot_data(payload):  
     try:
         # Time stamp
-        epoch = payload.get("timestamp")  # safe get
+        epoch = payload.get(FIRE_SET_TIMESTAMP)  # safe get
         if epoch is None:
             print("Warning: timestamp missing, using current UTC time")
             tStamp = datetime.now(timezone.utc)
@@ -277,20 +277,23 @@ def fire_write_iot_data(payload):
             tStamp = datetime.fromtimestamp(epoch, tz=timezone.utc)
 
         iotType = payload.get(JSON_IOT_TYPE)
-        iotName = payload.get(JSON_IOT_NAME)
-        userId = payload.get(JSON_USER_ID)
-        monId = payload.get(JSON_MONITOR_DOC_ID)
-
+        monDocId = payload.get(JSON_MONITOR_DOC_ID)
+        userDocId = payload.get(JSON_USER_DOC_ID)
+        
+        printDebug(f"userDocId: {userDocId}")
+        printDebug(f"monDocId: {monDocId}")
+        
         if(iotType == IOT_TYPE_WHEEL):
-            doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userId)\
-                .collection(FIRE_COLLECT_MONITORS).document(monId)\
-                .collection(FIRE_COLLECT_IOT_DATA).document()
+            doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId)\
+                .collection(FIRE_COLLECT_MONITORS).document(monDocId)\
+                .collection(FIRE_COLLECT_IOT_DATA)\
+                .document()
             
             doc_ref.set({
-                FIRE_SET_MON_ID: monId,
-                FIRE_SET_USER_DOC_ID: userId,
+                FIRE_SET_MON_ID: monDocId,
+                FIRE_SET_USER_DOC_ID: userDocId,
                 FIRE_SET_DISTANCE: payload.get(JSON_SET_DISTANCE, 0.0),
-                FIRE_SET_MON_NAME: iotName,
+                FIRE_SET_MON_NAME: payload.get(JSON_IOT_NAME),
                 FIRE_SET_MON_TYPE: iotType,
                 FIRE_SET_LINES: payload.get(JSON_SET_LINES, 0),
                 FIRE_SET_OPERATOR: payload.get(JSON_SET_OPERATOR, "none"),
@@ -299,8 +302,11 @@ def fire_write_iot_data(payload):
             }, merge=True)
             
             printDebug(f"Firestore Write: {payload}")
+        else:
+            printDebug(f"Unknown Test Type: {iotType}")
+
     except Exception as e:
-        print(f"ERROR: fire_write_ip_adr(), writing to Firestore: {e}")
+        print(f"ERROR: fire_write_iot_data: {e}")
 
 # Bluetooth Methods
 async def bt_discover():
@@ -345,8 +351,6 @@ async def bt_discover():
                 await bt_connect(device)
                 await bt_update_connection_status(device)
                 await bt_send_credentials(device)
-
-        printDebug(f"BT Connected Status: {lstBtConnectedDevices}")
                     
         await asyncio.sleep(10)   # yield 10s
 async def bt_connect(device):
@@ -541,6 +545,7 @@ async def main():
                 try:
                     payload = mqtt_broker.queue.get_nowait()
                     fire_write_iot_data(payload)
+                    print("New Paylod")
                 except Empty:
                     pass
     

@@ -138,11 +138,11 @@ class MqttServer:
     def on_message(self, client, userdata, msg):
         self.printMqttComms(f"MQTT RX: {msg.payload.decode()}")
 
-        data = json.loads(msg.payload.decode())
-        from_id = data.get(MQTT_JSON_FROM_DEVICE_ID, "")
-        to_id = data.get(MQTT_JSON_TO_DEVICE_ID, "")
-        payload = data.get(MQTT_JSON_PAYLOAD, "")
-        command = data.get(MQTT_JSON_CMD, "")
+        jsondata = json.loads(msg.payload.decode())
+        from_id = jsondata.get(MQTT_JSON_FROM_DEVICE_ID, "")
+        to_id = jsondata.get(MQTT_JSON_TO_DEVICE_ID, "")
+        payload = jsondata.get(MQTT_JSON_PAYLOAD, "")
+        command = jsondata.get(MQTT_JSON_CMD, "")
         
         try:
             # From Android
@@ -249,7 +249,6 @@ class MqttServer:
 
                 # Pair - Scan Monitor ID 
                 if(command == MQTT_CMD_REQ_MONITOR):
-                    recievedMonitor = True
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
                     
                     txPayload = {
@@ -262,10 +261,6 @@ class MqttServer:
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
                   
-                    # if(showAdvertiseMsg):
-                    #     showAdvertiseMsg = False
-                    #     self.printMqttInfo(f"iOT Advertising: {iot_id}")
-                
                 # ACK 
                 if(command == MQTT_CMD_ACK):                     
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
