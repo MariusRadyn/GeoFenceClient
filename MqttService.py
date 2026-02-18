@@ -149,7 +149,7 @@ class MqttServer:
             if(msg.topic == MQTT_TOPIC_FROM_ANDROID):
                 #android_id = requester_id
 
-                # Scan Monitor (Broadcast)
+                # Pair - Scan Monitor (Broadcast)
                 if(command == MQTT_CMD_REQ_MONITOR):
                     response_topic = f"{MQTT_TOPIC_TO_IOT}"
                     
@@ -161,7 +161,7 @@ class MqttServer:
                         MQTT_JSON_FROM_DEVICE_ID: from_id,
                         MQTT_JSON_TO_DEVICE_ID: "",         # Broadcast
                         MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: "",
+                        MQTT_JSON_PAYLOAD: payload,
                         MQTT_JSON_CMD : MQTT_CMD_REQ_MONITOR
                     }
         
@@ -170,8 +170,6 @@ class MqttServer:
             
                 # Found Monitor
                 if(command == MQTT_CMD_FOUND_MONITOR):
-                    #recievedMonitor = False   
-                    #showAdvertiseMsg = True  
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
                     
                     # Build JSON payload
@@ -179,7 +177,7 @@ class MqttServer:
                         MQTT_JSON_FROM_DEVICE_ID: from_id,
                         MQTT_JSON_TO_DEVICE_ID: to_id,
                         MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: to_id,
+                        MQTT_JSON_PAYLOAD: payload,
                         MQTT_JSON_CMD:MQTT_CMD_FOUND_MONITOR
                     }
         
@@ -197,14 +195,14 @@ class MqttServer:
                     
                     iot_type = payload[SETTING_JSON_IOT_TYPE]
                     ticks = payload[SETTING_JSON_TICKS_PER_M]
-                    userId = payload[SETTING_JSON_USER_ID]
-                    docId = payload[SETTING_JSON_DOC_ID]
+                    #userId = payload[SETTING_JSON_USER_ID]
+                    #docId = payload[SETTING_JSON_DOC_ID]
 
                     settings = {
                         SETTING_JSON_IOT_TYPE: iot_type,
                         SETTING_JSON_TICKS_PER_M: ticks,
-                        SETTING_JSON_DOC_ID: docId,
-                        SETTING_JSON_USER_ID: userId,
+                        #SETTING_JSON_DOC_ID: docId,
+                        #SETTING_JSON_USER_ID: userId,
                     }
 
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
@@ -346,7 +344,7 @@ class MqttServer:
 
 
         except json.JSONDecodeError:  
-            #print(f"Invalid JSON received {self.client_id}")
+            print(f"Invalid JSON received {self.client_id}")
             return
     def on_disconnect(self, client, userdata, rc, properties=None):
         print(f"MQTT Disconnected: {rc}")

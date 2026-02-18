@@ -81,16 +81,25 @@ JSON_SET_TIMESTAMP = "timestamp"
 JSON_USER_ID = "userId"  
 JSON_MONITOR_DOC_ID = "docId"  
 JSON_IOT_TYPE = "iotType" 
+JSON_IOT_NAME = "iotName" 
 
 # Firestore
 TARGET_PREFIX = "iOT"
 FIRE_COLLECT_CLIENTS = "clients"
 FIRE_COLLECT_USERS = "users"
 FIRE_COLLECT_MONITORS = "monitors"
-FIRE_COLLECT_MONITOR_DATA = "data"
+FIRE_COLLECT_IOT_DATA = "iotdata"
 
+# (Firsetore) Base IP Address
 FIRE_SET_IP_ADR = "IPAdress"
 FIRE_SET_IP_LAST_CON = "LastConnected"
+
+# (Firsetore) General Settings
+FIRE_SET_IMAGE = "image"
+FIRE_SET_MON_TYPE = "iotType"
+FIRE_SET_MON_NAME = "iotName"
+FIRE_SET_MON_ID = "monDocId"
+FIRE_SET_USER_DOC_ID = "userDocId"
 
 # (Firsetore) Distance Wheel
 FIRE_SET_OPERATOR = "operator"
@@ -268,19 +277,24 @@ def fire_write_iot_data(payload):
             tStamp = datetime.fromtimestamp(epoch, tz=timezone.utc)
 
         iotType = payload.get(JSON_IOT_TYPE)
+        iotName = payload.get(JSON_IOT_NAME)
         userId = payload.get(JSON_USER_ID)
         monId = payload.get(JSON_MONITOR_DOC_ID)
 
         if(iotType == IOT_TYPE_WHEEL):
             doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userId)\
                 .collection(FIRE_COLLECT_MONITORS).document(monId)\
-                .collection(FIRE_COLLECT_MONITOR_DATA).document()
+                .collection(FIRE_COLLECT_IOT_DATA).document()
             
             doc_ref.set({
+                FIRE_SET_MON_ID: monId,
+                FIRE_SET_USER_DOC_ID: userId,
                 FIRE_SET_DISTANCE: payload.get(JSON_SET_DISTANCE, 0.0),
+                FIRE_SET_MON_NAME: iotName,
+                FIRE_SET_MON_TYPE: iotType,
+                FIRE_SET_LINES: payload.get(JSON_SET_LINES, 0),
                 FIRE_SET_OPERATOR: payload.get(JSON_SET_OPERATOR, "none"),
                 FIRE_SET_SUPERVISOR: payload.get(JSON_SET_SUPERVISOR, "none"),
-                FIRE_SET_LINES: payload.get(JSON_SET_LINES, 0),
                 FIRE_SET_TIMESTAMP: tStamp
             }, merge=True)
             
@@ -377,7 +391,7 @@ async def bt_update_connection_status(device):
     try:
         addr = device.address
         name = device.name if device.name else "Unknown"
-        date_time = datetime.datetime.now().strftime("%d:%m:%Y %H:%M:%S")
+        date_time = datetime.now().strftime("%d:%m:%Y %H:%M:%S")
 
         # Check if device is already in list
         existing = next((x for x in lstBtConnectedDevices if x[CONNECT_ADR] == addr), None)
