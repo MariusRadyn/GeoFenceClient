@@ -107,13 +107,14 @@ FIRE_SET_SUPERVISOR = "supervisor"
 FIRE_SET_DISTANCE = "distance"
 FIRE_SET_LINES = "lines"
 FIRE_SET_TIMESTAMP = "timestamp"
+FIRE_SET_LAST_LOG_TIMESTAMP = "lastLogTimestamp"
 
 cred = credentials.Certificate(os.path.expanduser("~/Secure/ServiceAccountKey.json"))
 firebase_admin.initialize_app(cred)
 dbFire = firestore.client()
 
 # Debug
-PRINT_DEBUG_ENABLED = True
+PRINT_DEBUG_ENABLED = False
 
 # Methods
 def checkWifiConnection():
@@ -280,26 +281,33 @@ def fire_write_iot_data(payload):
         monDocId = payload.get(JSON_MONITOR_DOC_ID)
         userDocId = payload.get(JSON_USER_DOC_ID)
         
-        printDebug(f"userDocId: {userDocId}")
-        printDebug(f"monDocId: {monDocId}")
-        
+        if not userDocId or not monDocId:
+            print("ERROR: Missing userDocId or monDocId")
+            return
+
+        # Add IOT Log Data 
         if(iotType == IOT_TYPE_WHEEL):
-            doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId)\
+            dbFire.collection(FIRE_COLLECT_USERS).document(userDocId)\
                 .collection(FIRE_COLLECT_MONITORS).document(monDocId)\
                 .collection(FIRE_COLLECT_IOT_DATA)\
-                .document()
+                .add({
+                    #FIRE_SET_MON_ID: monDocId,
+                    #FIRE_SET_USER_DOC_ID: userDocId,
+                    #FIRE_SET_MON_NAME: payload.get(JSON_IOT_NAME),
+                    #FIRE_SET_MON_TYPE: iotType,
+                    FIRE_SET_DISTANCE: payload.get(JSON_SET_DISTANCE, 0.0),
+                    FIRE_SET_LINES: payload.get(JSON_SET_LINES, 0),
+                    FIRE_SET_OPERATOR: payload.get(JSON_SET_OPERATOR, "none"),
+                    FIRE_SET_SUPERVISOR: payload.get(JSON_SET_SUPERVISOR, "none"),
+                    FIRE_SET_TIMESTAMP: tStamp
+                })
             
-            doc_ref.set({
-                FIRE_SET_MON_ID: monDocId,
-                FIRE_SET_USER_DOC_ID: userDocId,
-                FIRE_SET_DISTANCE: payload.get(JSON_SET_DISTANCE, 0.0),
-                FIRE_SET_MON_NAME: payload.get(JSON_IOT_NAME),
-                FIRE_SET_MON_TYPE: iotType,
-                FIRE_SET_LINES: payload.get(JSON_SET_LINES, 0),
-                FIRE_SET_OPERATOR: payload.get(JSON_SET_OPERATOR, "none"),
-                FIRE_SET_SUPERVISOR: payload.get(JSON_SET_SUPERVISOR, "none"),
-                FIRE_SET_TIMESTAMP: tStamp
-            }, merge=True)
+            # Set Monitor Data - Timestamp
+            dbFire.collection(FIRE_COLLECT_USERS).document(userDocId)\
+                .collection(FIRE_COLLECT_MONITORS).document(monDocId)\
+                .set({
+                    FIRE_SET_LAST_LOG_TIMESTAMP: tStamp
+                }, merge=True)
             
             printDebug(f"Firestore Write: {payload}")
         else:
@@ -545,7 +553,6 @@ async def main():
                 try:
                     payload = mqtt_broker.queue.get_nowait()
                     fire_write_iot_data(payload)
-                    print("New Paylod")
                 except Empty:
                     pass
     
