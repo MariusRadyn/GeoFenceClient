@@ -241,7 +241,7 @@ def fire_write_ip_adr(bt_name="",ip_address=""):
         doc_ref = dbFire.collection(FIRE_COLLECT_CLIENTS).document(bt_name)
         doc_ref.set({
             FIRE_SET_IP_ADR: ip_address,
-            FIRE_SET_IP_LAST_CON: datetime.datetime.now().strftime("%d:%m:%Y %H:%M:%S")
+            FIRE_SET_IP_LAST_CON: datetime.now().strftime("%d:%m:%Y %H:%M:%S")
         }, merge=True)
         
         print(f"Firestore Write: {bt_name}@{ip_address}")
