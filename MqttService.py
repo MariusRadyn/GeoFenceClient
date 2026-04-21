@@ -37,14 +37,15 @@ SETTING_JSON_USER_ID = "userId"
 SETTING_JSON_DOC_ID = "docId"
 
 #MQTT Commands
-MQTT_CMD_REQ_MONITOR = "#REQ_MONITOR"
+MQTT_CMD_DISCOVERY = "#REQ_MONITOR"
 MQTT_CMD_FOUND_MONITOR = "#FOUND_MONITOR"
 MQTT_CMD_CONNECT_MONITOR = "#CONNECT_MONITOR"
 MQTT_CMD_DISCONNECT_MONITOR = "#DISCONNECT_MONITOR"
+MQTT_CMD_PING = "#PING"
 MQTT_CMD_SETTINGS = "#REQ_SETTINGS"
 MQTT_CMD_ACK = "#ACK"
 MQTT_CMD_DEVICE_ID = "#DEVICE_ID"
-MQTT_CMD_MONITOR_DATA = "#MONITOR_DATA"
+MQTT_CMD_LIVE_MONITOR_DATA = "#MONITOR_DATA"
 MQTT_CMD_MEASURE_DATA = "#MEASURE_DATA"
 
 #Debug
@@ -143,14 +144,15 @@ class MqttServer:
         to_id = jsondata.get(MQTT_JSON_TO_DEVICE_ID, "")
         payload = jsondata.get(MQTT_JSON_PAYLOAD, "")
         command = jsondata.get(MQTT_JSON_CMD, "")
+        myId = self.client_id
         
         try:
             # From Android
             if(msg.topic == MQTT_TOPIC_FROM_ANDROID):
                 #android_id = requester_id
 
-                # Pair - Scan Monitor (Broadcast)
-                if(command == MQTT_CMD_REQ_MONITOR):
+                # Discover / Pair - Scan Monitor (Broadcast)
+                if(command == MQTT_CMD_DISCOVERY):
                     response_topic = f"{MQTT_TOPIC_TO_IOT}"
                     
                     # Broadcast to ALL IOT
@@ -162,7 +164,7 @@ class MqttServer:
                         MQTT_JSON_TO_DEVICE_ID: "",         # Broadcast
                         MQTT_JSON_TOPIC: response_topic,
                         MQTT_JSON_PAYLOAD: payload,
-                        MQTT_JSON_CMD : MQTT_CMD_REQ_MONITOR
+                        MQTT_JSON_CMD : MQTT_CMD_DISCOVERY
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -189,7 +191,8 @@ class MqttServer:
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
                     client.publish(response_topic, json.dumps(self.settings))
                     self.printMqttComms(f"MQTT TX: {self.settings} {response_topic}")
-        
+                    # Add BaseStation LIST here
+
                 # Connect to Monitor
                 if(command == MQTT_CMD_CONNECT_MONITOR):
                     
@@ -233,6 +236,21 @@ class MqttServer:
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
 
+                # PING
+                if(command == MQTT_CMD_PING): 
+                    
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
+                    
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: myId,
+                        MQTT_JSON_TO_DEVICE_ID: from_id,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_CMD:MQTT_CMD_PING
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+
             # From IOT
             if(msg.topic == MQTT_TOPIC_FROM_IOT):
                 #iot_id = requester_id
@@ -248,14 +266,14 @@ class MqttServer:
                     self.printMqttComms(f"MQTT TX: {self.settings} {response_topic}")
 
                 # Pair - Scan Monitor ID 
-                if(command == MQTT_CMD_REQ_MONITOR):
+                if(command == MQTT_CMD_DISCOVERY):
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
                     
                     txPayload = {
                         MQTT_JSON_FROM_DEVICE_ID: from_id,
                         MQTT_JSON_TOPIC: response_topic,
                         MQTT_JSON_PAYLOAD: "",
-                        MQTT_JSON_CMD:MQTT_CMD_REQ_MONITOR
+                        MQTT_JSON_CMD:MQTT_CMD_DISCOVERY
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -276,14 +294,14 @@ class MqttServer:
                     self.printMqttComms(f"MQTT TX: {txPayload}")
      
                 # IOT Data 
-                if(command == MQTT_CMD_MONITOR_DATA):                 
+                if(command == MQTT_CMD_LIVE_MONITOR_DATA):                 
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
                      
                     txPayload = {
                         MQTT_JSON_FROM_DEVICE_ID: from_id,
                         MQTT_JSON_TOPIC: response_topic,
                         MQTT_JSON_PAYLOAD: payload,
-                        MQTT_JSON_CMD:MQTT_CMD_MONITOR_DATA
+                        MQTT_JSON_CMD:MQTT_CMD_LIVE_MONITOR_DATA
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -336,7 +354,6 @@ class MqttServer:
         
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
-
 
         except json.JSONDecodeError:  
             print(f"Invalid JSON received {self.client_id}")

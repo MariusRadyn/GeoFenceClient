@@ -66,7 +66,7 @@ CONNECT_TIME =  "last_seen"
 # Commands
 CMD_SHARED_WIFI_CREDENTIALS = "wificred" # Format: wificred:ssid>password>ipAdress
 
-# iot Type
+# iOT Type
 IOT_TYPE_VEHICLE = "Vehicle"
 IOT_TYPE_MOBILE_MACHINE = "Mobile Machine"
 IOT_TYPE_STATIONARY_MACHINE = "Stationary Machine"
@@ -88,7 +88,7 @@ TARGET_PREFIX = "iOT"
 FIRE_COLLECT_CLIENTS = "clients"
 FIRE_COLLECT_USERS = "users"
 FIRE_COLLECT_MONITORS = "monitors"
-FIRE_COLLECT_IOT_DATA = "iotdata"
+FIRE_COLLECT_IOT_DATA = "iotData"
 
 # (Firsetore) Base IP Address
 FIRE_SET_IP_ADR = "IPAdress"
@@ -287,27 +287,30 @@ def fire_write_iot_data(payload):
 
         # Add IOT Log Data 
         if(iotType == IOT_TYPE_WHEEL):
-            dbFire.collection(FIRE_COLLECT_USERS).document(userDocId)\
+
+            batch = dbFire.batch()
+
+            iot_doc = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId)\
                 .collection(FIRE_COLLECT_MONITORS).document(monDocId)\
                 .collection(FIRE_COLLECT_IOT_DATA)\
-                .add({
-                    #FIRE_SET_MON_ID: monDocId,
-                    #FIRE_SET_USER_DOC_ID: userDocId,
-                    #FIRE_SET_MON_NAME: payload.get(JSON_IOT_NAME),
-                    #FIRE_SET_MON_TYPE: iotType,
-                    FIRE_SET_DISTANCE: payload.get(JSON_SET_DISTANCE, 0.0),
-                    FIRE_SET_LINES: payload.get(JSON_SET_LINES, 0),
-                    FIRE_SET_OPERATOR: payload.get(JSON_SET_OPERATOR, "none"),
-                    FIRE_SET_SUPERVISOR: payload.get(JSON_SET_SUPERVISOR, "none"),
-                    FIRE_SET_TIMESTAMP: tStamp
-                })
+                .document()
             
+            doc = {
+                FIRE_SET_DISTANCE: payload.get(JSON_SET_DISTANCE, 0.0),
+                FIRE_SET_LINES: payload.get(JSON_SET_LINES, 0),
+                FIRE_SET_OPERATOR: payload.get(JSON_SET_OPERATOR, "none"),
+                FIRE_SET_SUPERVISOR: payload.get(JSON_SET_SUPERVISOR, "none"),
+                FIRE_SET_TIMESTAMP: tStamp
+            }
+            
+            batch.set(iot_doc, doc, merge=False)
+
             # Set Monitor Data - Timestamp
-            dbFire.collection(FIRE_COLLECT_USERS).document(userDocId)\
-                .collection(FIRE_COLLECT_MONITORS).document(monDocId)\
-                .set({
-                    FIRE_SET_LAST_LOG_TIMESTAMP: tStamp
-                }, merge=True)
+            mon_doc = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId) \
+                            .collection(FIRE_COLLECT_MONITORS).document(monDocId)
+
+            batch.set(mon_doc, {FIRE_SET_LAST_LOG_TIMESTAMP: tStamp}, merge=True)
+            batch.commit()
             
             printDebug(f"Firestore Write: {payload}")
         else:
@@ -499,6 +502,7 @@ async def main():
             # Get Unit Name
             case 0:
                 BT_NAME = bt_get_name()
+                MqttService.myDeviceID = BT_NAME
                 print(f"\nBluetooth Name: {BT_NAME}")
                 casePtr+=1
             
@@ -528,7 +532,7 @@ async def main():
             case 3:
                 WIFI_SSID,WIFI_PASSWORD = WifiCredentials.get_credentials(new_creds=args.newcreds, encrypt=args.encrypt)
                 print(f"SSID: {WIFI_SSID}")
-                print(f"Password: {WIFI_PASSWORD}") 
+                #print(f"Password: {WIFI_PASSWORD}") 
                 casePtr+=1
 
             # Discover Bluetooth iOT Devices
@@ -548,13 +552,14 @@ async def main():
             
             # Idle
             case 6:
-                await asyncio.sleep(0.01)
-
+                await asyncio.sleep(0.1)
                 try:
-                    payload = mqtt_broker.queue.get_nowait()
-                    fire_write_iot_data(payload)
+                    if(mqtt_broker.queue.not_empty):
+                        payload = mqtt_broker.queue.get_nowait()
+                        fire_write_iot_data(payload)
                 except Empty:
                     pass
+    
     
             case _:
                 await asyncio.sleep(10)
