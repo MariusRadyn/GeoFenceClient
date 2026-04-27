@@ -18,6 +18,7 @@ from WifiCredentials import parser as wifi_parser
 import os   
 from datetime import datetime, timezone
 from queue import Empty
+import pickle  # For binary file operations
 #import paho.mqtt.client as mqtt
 
 
@@ -89,6 +90,7 @@ FIRE_COLLECT_CLIENTS = "clients"
 FIRE_COLLECT_USERS = "users"
 FIRE_COLLECT_MONITORS = "monitors"
 FIRE_COLLECT_IOT_DATA = "iotData"
+FIRE_COLLECT_OPERATORS = "operators"
 
 # (Firsetore) Base IP Address
 FIRE_SET_IP_ADR = "IPAdress"
@@ -102,17 +104,29 @@ FIRE_SET_MON_ID = "monDocId"
 FIRE_SET_USER_DOC_ID = "userDocId"
 
 # (Firsetore) Distance Wheel
-FIRE_SET_OPERATOR = "operator"
-FIRE_SET_SUPERVISOR = "supervisor"
-FIRE_SET_DISTANCE = "distance"
-FIRE_SET_LINES = "lines"
-FIRE_SET_TIMESTAMP = "timestamp"
-FIRE_SET_LAST_LOG_TIMESTAMP = "lastLogTimestamp"
+FIRE_WHEEL_OPERATOR = "operator"
+FIRE_WHEEL_SUPERVISOR = "supervisor"
+FIRE_WHEEL_DISTANCE = "distance"
+FIRE_WHEEL_LINES = "lines"
+FIRE_WHEEL_TIMESTAMP = "timestamp"
+FIRE_WHEEL_LAST_LOG_TIMESTAMP = "lastLogTimestamp"
 
+# (Firsetore) Operators
+FIRE_OPERATOR_VERSION = "operatorsVer"
+FIRE_OPERATOR_NAME = "name"
+FIRE_OPERATOR_SURNAME = "surname"
+FIRE_OPERATOR_ACCESS_LEVEL = "accessLevel"
+FIRE_OPERATOR_TAG_ID = "tagId"
+
+mqtt_broker = MqttService.MqttServer() 
 cred = credentials.Certificate(os.path.expanduser("~/Secure/ServiceAccountKey.json"))
 firebase_admin.initialize_app(cred)
 dbFire = firestore.client()
-
+operators_version = "0"
+operators_version_file = os.path.expanduser("~/Secure/operator_version.bin")
+operators_data_file = os.path.expanduser("~/Secure/operators.bin")
+uid_data_file = os.path.expanduser("~/Secure/uid.bin")
+  
 # Debug
 PRINT_DEBUG_ENABLED = False
 
@@ -137,7 +151,7 @@ def checkWifiConnection():
 def printDebug(msg):
     if PRINT_DEBUG_ENABLED:
         print(msg)
-def sync_ip_address(ipLocal):
+def fire_sync_ip_address(ipLocal):
     global settings 
     
     # Write IP Address to Firestore
@@ -298,8 +312,8 @@ def fire_write_iot_data(payload):
             doc = {
                 FIRE_SET_DISTANCE: payload.get(JSON_SET_DISTANCE, 0.0),
                 FIRE_SET_LINES: payload.get(JSON_SET_LINES, 0),
-                FIRE_SET_OPERATOR: payload.get(JSON_SET_OPERATOR, "none"),
-                FIRE_SET_SUPERVISOR: payload.get(JSON_SET_SUPERVISOR, "none"),
+                FIRE_WHEEL_OPERATOR: payload.get(JSON_SET_OPERATOR, "none"),
+                FIRE_WHEEL_SUPERVISOR: payload.get(JSON_SET_SUPERVISOR, "none"),
                 FIRE_SET_TIMESTAMP: tStamp
             }
             
@@ -318,6 +332,134 @@ def fire_write_iot_data(payload):
 
     except Exception as e:
         print(f"ERROR: fire_write_iot_data: {e}")
+
+# Operators List Methods
+def read_local_operators_version():
+    global operators_version_file
+    local_version = "0"
+   
+    if os.path.exists(operators_version_file):
+        try:
+            with open(operators_version_file, 'rb') as f:
+                local_version = pickle.load(f)
+    
+        except Exception as e:
+            print(f"fire_read_operators_version(): {e}")
+            local_version = "0"
+    
+    return local_version
+def sync_local_operators_list():
+    global operators_data_file
+    operators = []
+    if os.path.exists(operators_data_file):
+        try:
+            with open(operators_data_file, 'rb') as f:
+                operators = pickle.load(f)
+    
+        except Exception as e:
+            print(f"read_local_operators_list(): {e}")
+            operators = []
+    
+    if operators:
+        mqtt_broker.syncIot(operators)
+        
+def fire_read_operators_version():
+    try:
+        if(len(MqttService.FIRE_USER_ID) < 28):  # Firestore User Doc IDs are 28 chars long
+            print("Cant sync operator list. No User ID found. Connect Android app to Base Station")
+            return "0"
+            
+        version_doc = dbFire.collection(FIRE_COLLECT_USERS).document(MqttService.FIRE_USER_ID)
+        user_snapshot = version_doc.get()
+        
+        version = "0"
+        if user_snapshot.exists:
+            user_data = user_snapshot.to_dict()
+            version = user_data.get(FIRE_OPERATOR_VERSION, 0)
+        else:
+            dbFire.collection(FIRE_COLLECT_USERS).document(MqttService.FIRE_USER_ID).set({FIRE_OPERATOR_VERSION: version})
+        
+        return version
+    
+    except Exception as e:
+        print(f"fire_read_operators_version(): {e}")
+        return "0"
+def fire_read_operators(userId=""): 
+    try:
+        if not userId:
+            print("ERROR: fire_read_operators(), Missing userDocId")
+            return []
+            
+        operators_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userId)\
+            .collection(FIRE_COLLECT_OPERATORS)
+        
+        docs = operators_ref.stream()
+        
+        operators = []
+        for doc in docs:
+            operators.append(doc.to_dict())
+            
+        printDebug(f"Firestore Read Operators: {len(operators)} operators found")
+        return operators
+        
+    except Exception as e:
+        print(f"ERROR: fire_read_operators(): {e}")
+        return []
+def fire_sync_operator_list():
+    global operators_version_file
+    global operators_data_file
+
+    try:
+        if(len(MqttService.FIRE_USER_ID) < 28):  # Firestore User Doc IDs are 28 chars long
+            print("Cant sync operator list. No User ID found. Connect Android app to Base Station")
+            return "0"
+        
+        print(f"Syncing operators for UID: {MqttService.FIRE_USER_ID}...")
+        
+        # Get Operators Version
+        fire_operator_ver = fire_read_operators_version()
+        local_operator_ver = read_local_operators_version()    
+
+        if(fire_operator_ver == local_operator_ver):
+            print("Up to Date.")
+            return
+        
+        # Get Operators
+        operators = fire_read_operators(MqttService.FIRE_USER_ID)
+    
+        if operators:
+            operator_data = []
+            for op in operators:
+                operator_data.append({
+                    FIRE_OPERATOR_NAME: op.get(FIRE_OPERATOR_NAME, ""),
+                    FIRE_OPERATOR_SURNAME: op.get(FIRE_OPERATOR_SURNAME, ""),
+                    FIRE_OPERATOR_ACCESS_LEVEL: op.get(FIRE_OPERATOR_ACCESS_LEVEL, 0),
+                    FIRE_OPERATOR_TAG_ID: op.get(FIRE_OPERATOR_TAG_ID, "")
+                })
+            
+            # Save to binary file
+           
+            with open(operators_data_file, 'wb') as f:
+                pickle.dump(operator_data, f)
+            
+            print(f"Saved {len(operator_data)} operators to {operators_data_file}")
+        
+        # Create new version from timestamp
+        new_version = str(int(datetime.now(timezone.utc).timestamp()))  
+        
+        # Save version to local bin file
+        with open(operators_version_file, 'wb') as f:
+            pickle.dump(new_version, f)
+        
+        # Update Firestore with new version
+        dbFire.collection(FIRE_COLLECT_USERS)\
+            .document(MqttService.FIRE_USER_ID)\
+            .set({FIRE_OPERATOR_VERSION: new_version}, merge=True )
+
+        print(f"Updated version to: {new_version}")
+   
+    except Exception as e:
+        print(f"ERROR: sync_operator_list: {e}")
 
 # Bluetooth Methods
 async def bt_discover():
@@ -493,6 +635,7 @@ async def main():
     global WIFI_PASSWORD
     global BT_NAME
     global IP_ADDRESS
+    global mqtt_broker
     wifiConnected = False
     casePtr = 0
 
@@ -502,7 +645,6 @@ async def main():
             # Get Unit Name
             case 0:
                 BT_NAME = bt_get_name()
-                MqttService.myDeviceID = BT_NAME
                 print(f"\nBluetooth Name: {BT_NAME}")
                 casePtr+=1
             
@@ -523,9 +665,12 @@ async def main():
                 casePtr+=1
             
             # Save IP to Firestore
+            # Sync Operators List from Firestore
             case 2:
-                if(sync_ip_address(IP_ADDRESS)):
+                if(fire_sync_ip_address(IP_ADDRESS)):
                     print(f"Update Firestore IP: {IP_ADDRESS}")
+                
+                fire_sync_operator_list()
                 casePtr+=1
             
             # Get Wifi Credenitials
@@ -543,10 +688,13 @@ async def main():
 
             # Start MQTT Service
             case 5:
-                mqtt_broker = MqttService.MqttServer(
-                    client_id = BT_NAME,
-                    broker_ip = IP_ADDRESS,
-                ) 
+                # mqtt_broker = MqttService.MqttServer(
+                #     client_id = BT_NAME,
+                #     broker_ip = IP_ADDRESS,
+                # )
+                
+                mqtt_broker.client_id = BT_NAME
+                mqtt_broker.broker_ip = IP_ADDRESS 
                 await mqtt_broker.connectMqtt()
                 casePtr+=1
             
@@ -554,9 +702,33 @@ async def main():
             case 6:
                 await asyncio.sleep(0.1)
                 try:
-                    if(mqtt_broker.queue.not_empty):
-                        payload = mqtt_broker.queue.get_nowait()
-                        fire_write_iot_data(payload)
+                    if not mqtt_broker.queue.empty():
+                        message = mqtt_broker.queue.get_nowait()
+
+                        command = message.get(MqttService.MQTT_JSON_CMD, "")
+                        payload = message.get(MqttService.MQTT_JSON_PAYLOAD, {})
+                        print(f"Queue: {command}")
+                        
+                        if command == MqttService.MQTT_CMD_IOT_DATA:
+                            fire_write_iot_data(payload)
+                        
+                        elif command == MqttService.MQTT_CMD_CONNECT_BASE:
+                            iot_type = payload.get(MqttService.SETTING_JSON_IOT_TYPE, "")
+                            
+                            if iot_type == IOT_TYPE_WHEEL:
+                                with open(uid_data_file, 'wb') as f:
+                                    pickle.dump(MqttService.FIRE_USER_ID, f)
+                                    printDebug(f"Saved User ID for Firestore: {MqttService.FIRE_USER_ID}")
+                                fire_sync_operator_list()
+                     
+                        elif command == MqttService.MQTT_CMD_SYNC:
+                            iot_type = payload.get(MqttService.SETTING_JSON_IOT_TYPE, "")
+                            
+                            if iot_type == IOT_TYPE_WHEEL:
+                                fire_sync_operator_list()
+                                operators = read_local_operators_list()
+                                mqtt_broker.syncIot(operators)
+                     
                 except Empty:
                     pass
     
@@ -631,3 +803,4 @@ async def bt_handshake(device):
 
     except Exception as e:
         print("Error with device:", e)
+

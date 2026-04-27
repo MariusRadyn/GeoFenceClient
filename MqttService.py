@@ -1,3 +1,4 @@
+from copyreg import pickle
 import json
 import time
 from queue import Queue
@@ -8,9 +9,7 @@ from paho.mqtt.packettypes import PacketTypes
 
 #client.connect("broker_ip", 1883, properties=props)
 
-# IMPORTANT:
-# Use the PI's IP address here, not "0.0.0.0"
-BROKER = "192.168.1.114"        # <--- CHANGE TO YOUR RPI IP
+BROKER = "0.0.0.0"        
 PORT = 1883
 
 #MQTT Topics
@@ -40,19 +39,29 @@ SETTING_JSON_DOC_ID = "docId"
 MQTT_CMD_DISCOVERY = "#REQ_MONITOR"
 MQTT_CMD_FOUND_MONITOR = "#FOUND_MONITOR"
 MQTT_CMD_CONNECT_MONITOR = "#CONNECT_MONITOR"
+MQTT_CMD_CONNECT_BASE = "#CONNECT_BASE"
 MQTT_CMD_DISCONNECT_MONITOR = "#DISCONNECT_MONITOR"
 MQTT_CMD_PING = "#PING"
 MQTT_CMD_SETTINGS = "#REQ_SETTINGS"
 MQTT_CMD_ACK = "#ACK"
 MQTT_CMD_DEVICE_ID = "#DEVICE_ID"
 MQTT_CMD_LIVE_MONITOR_DATA = "#MONITOR_DATA"
-MQTT_CMD_MEASURE_DATA = "#MEASURE_DATA"
+MQTT_CMD_IOT_DATA = "#IOT_DATA"
+MQTT_CMD_TAG_REQ = "#TAG_REQ"
+MQTT_CMD_TAG_DATA = "#TAG_DATA"
+
+TAG_REQUESTED_FROM_DEVICE_ID = ""
+
+#Firebase
+FIRE_USER_ID = ''
+FIRE_NEW_UID_RECEIVED = False
 
 #Debug
 PRINT_MQTT_COMMS = True
 PRINT_MQTT_INFO = True
 
 class MqttServer:
+    
     def __init__(
             self, 
             client_id, 
@@ -128,7 +137,9 @@ class MqttServer:
     # Callbacks
     # -----------------------------
     def on_connect(self, client, userdata, flags, reason_code, properties):
-        #print(f"[{self.client_id}] Connected to broker: {reason_code}")
+        global TAG_REQUESTED_FROM_DEVICE_ID
+        global FIRE_USER_ID
+
         self.printMqttInfo(f"MQTT Connected: {reason_code}")
         
         client.subscribe(MQTT_TOPIC_FROM_IOT)
@@ -137,6 +148,9 @@ class MqttServer:
         client.subscribe(MQTT_TOPIC_FROM_ANDROID)
         self.printMqttInfo(f"MQTT Subscribed: {MQTT_TOPIC_FROM_ANDROID}")
     def on_message(self, client, userdata, msg):
+        global TAG_REQUESTED_FROM_DEVICE_ID
+        global FIRE_USER_ID
+
         self.printMqttComms(f"MQTT RX: {msg.payload.decode()}")
 
         jsondata = json.loads(msg.payload.decode())
@@ -221,7 +235,7 @@ class MqttServer:
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
 
-                # DisConnect to Monitor
+                # Disconnect to Monitor
                 if(command == MQTT_CMD_DISCONNECT_MONITOR): 
                     
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
@@ -236,9 +250,8 @@ class MqttServer:
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
 
-                # PING
-                if(command == MQTT_CMD_PING): 
-                    
+                # PING (Check if Base is there)
+                if(command == MQTT_CMD_PING):         
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
                     
                     txPayload = {
@@ -247,10 +260,55 @@ class MqttServer:
                         MQTT_JSON_TOPIC: response_topic,
                         MQTT_JSON_CMD:MQTT_CMD_PING
                     }
+
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+
+                # Connect Base Station
+                #!!!! Payload Has UID for Firestore User !!!!
+                if(command == MQTT_CMD_CONNECT_BASE): 
+                                    
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
+                    
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: myId,
+                        MQTT_JSON_TO_DEVICE_ID: from_id,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_CMD:MQTT_CMD_CONNECT_BASE
+                    }
         
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
 
+                    FIRE_USER_ID = payload.get(SETTING_JSON_USER_ID, "")
+                    if FIRE_USER_ID == "":
+                        print(f"No User ID found. Connect Andoid app to Base Station first.")
+                        return
+    
+                    # Start Queue for pushing operator list to firestore
+                    print(f"User ID: {FIRE_USER_ID}")
+                    try:
+                        self.queue.put_nowait(jsondata)
+                    except Full:
+                        self.queue.get_nowait()   # discard oldest
+                        self.queue.put_nowait(jsondata)
+    
+                # TAG Request 
+                if(command == MQTT_CMD_TAG_REQ): 
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
+                    
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: myId,
+                        MQTT_JSON_TO_DEVICE_ID: from_id,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_CMD:MQTT_CMD_PING
+                    }
+
+                    TAG_REQUESTED_FROM_DEVICE_ID = from_id
+
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+            
             # From IOT
             if(msg.topic == MQTT_TOPIC_FROM_IOT):
                 #iot_id = requester_id
@@ -293,6 +351,20 @@ class MqttServer:
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
      
+                # PING 
+                if(command == MQTT_CMD_PING):                     
+                    response_topic = f"{MQTT_TOPIC_TO_IOT}/{from_id}"
+                     
+                    txPayload = {
+                        MQTT_JSON_FROM_DEVICE_ID: myId,
+                        MQTT_JSON_TOPIC: response_topic,
+                        MQTT_JSON_PAYLOAD: "",
+                        MQTT_JSON_CMD:MQTT_CMD_PING
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+     
                 # IOT Data 
                 if(command == MQTT_CMD_LIVE_MONITOR_DATA):                 
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
@@ -308,14 +380,16 @@ class MqttServer:
                     self.printMqttComms(f"MQTT TX: {txPayload}")
 
                 # Measurement Data (Push to Cloud)
-                if(command == MQTT_CMD_MEASURE_DATA):                 
+                if(command == MQTT_CMD_IOT_DATA):                 
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{from_id}"
                     
                     try:
-                        self.queue.put_nowait(payload)
+                        self.queue.put_nowait(jsondata) # Queue for processing in main loop (to avoid doing heavy processing in callback)
+                        print(f"Queue enqueued command={jsondata.get(MQTT_JSON_CMD)}")
                     except Full:
                         self.queue.get_nowait()   # discard oldest
-                        self.queue.put_nowait(payload)
+                        self.queue.put_nowait(jsondata)
+                        print(f"Queue full; discarded oldest and enqueued command={jsondata.get(MQTT_JSON_CMD)}")
     
                     txPayload = {
                         MQTT_JSON_FROM_DEVICE_ID: from_id,
@@ -355,6 +429,22 @@ class MqttServer:
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
 
+                # Tag Data 
+                if(command == MQTT_CMD_TAG_DATA):    
+                    if(TAG_REQUESTED_FROM_DEVICE_ID != ""):
+
+                        response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{TAG_REQUESTED_FROM_DEVICE_ID}"
+                        
+                        txPayload = {
+                            MQTT_JSON_FROM_DEVICE_ID: from_id,
+                            MQTT_JSON_TOPIC: response_topic,
+                            MQTT_JSON_PAYLOAD: payload,
+                            MQTT_JSON_CMD:MQTT_CMD_TAG_DATA
+                        }
+            
+                        client.publish(response_topic, json.dumps(txPayload))
+                        self.printMqttComms(f"MQTT TX: {txPayload}")
+     
         except json.JSONDecodeError:  
             print(f"Invalid JSON received {self.client_id}")
             return
