@@ -1,5 +1,6 @@
 from copyreg import pickle
 import json
+import os
 import time
 from queue import Queue
 from queue import Full
@@ -21,19 +22,19 @@ MQTT_TOPIC_TO_ANDROID = "mqtt/to/android"
 MQTT_TOPIC_ANDROID = "mqtt/android"
 MQTT_TOPIC_CRED ="mqtt/credentials"
 
-# MQTT JSON
-MQTT_JSON_FROM_DEVICE_ID = "from"
-MQTT_JSON_TO_DEVICE_ID = "to"
-MQTT_JSON_TOPIC = "topic"
-MQTT_JSON_PAYLOAD = "payload"
-MQTT_JSON_CMD = "cmd"
-MQTT_JSON_WHEEL_DISTANCE = "wheel_distance"
-
-# JSON Settings
-SETTING_JSON_TICKS_PER_M = "ticksPerM"
-SETTING_JSON_IOT_TYPE = "iotType"
-SETTING_JSON_USER_ID = "userId"
-SETTING_JSON_DOC_ID = "docId"
+# MQTT Settings
+MQTT_SETTING_FROM_DEVICE_ID = "from"
+MQTT_SETTING_TO_DEVICE_ID = "to"
+MQTT_SETTING_TOPIC = "topic"
+MQTT_SETTING_PAYLOAD = "payload"
+MQTT_SETTING_OPERATORS_LIST = "operatorsList"
+MQTT_SETTING_OPERATORS_VERSION = "operatorsVer"
+MQTT_SETTING_CMD = "cmd"
+MQTT_SETTING_WHEEL_DISTANCE = "wheel_distance"
+MQTT_SETTING_TICKS_PER_M = "ticksPerM"
+MQTT_SETTING_IOT_TYPE = "iotType"
+MQTT_SETTING_USER_ID = "userId"
+MQTT_SETTING_DOC_ID = "docId"
 
 #MQTT Commands
 MQTT_CMD_DISCOVERY = "#REQ_MONITOR"
@@ -49,12 +50,12 @@ MQTT_CMD_LIVE_MONITOR_DATA = "#MONITOR_DATA"
 MQTT_CMD_IOT_DATA = "#IOT_DATA"
 MQTT_CMD_TAG_REQ = "#TAG_REQ"
 MQTT_CMD_TAG_DATA = "#TAG_DATA"
+MQTT_CMD_SYNC = "#SYNC"
+MQTT_CMD_OPERATOR_DATA = "#OPERATORS"
 
 TAG_REQUESTED_FROM_DEVICE_ID = ""
-
-#Firebase
-FIRE_USER_ID = ''
-FIRE_NEW_UID_RECEIVED = False
+SYNC_REQUESTED_FROM_DEVICE_ID = ""
+SYNC_REQUESTED_FROM_IOT_TYPE = ""
 
 #Debug
 PRINT_MQTT_COMMS = True
@@ -132,13 +133,38 @@ class MqttServer:
 
         if(PRINT_MQTT_INFO == True): 
             print(msg)
+    def sendOperators(self, operators_list, operators_version):
+        global SYNC_REQUESTED_FROM_DEVICE_ID
+        #global SYNC_REQUESTED_FROM_IOT_TYPE
+    
+        if SYNC_REQUESTED_FROM_DEVICE_ID == "":
+            print(f"No sync requested. Ignoring sync.")
+            return
+                   
+        response_topic = f"{MQTT_TOPIC_TO_IOT}/{SYNC_REQUESTED_FROM_DEVICE_ID}"
         
+        payload = {
+            MQTT_SETTING_OPERATORS_LIST: operators_list  ,
+            #SETTING_JSON_IOT_TYPE: SYNC_REQUESTED_FROM_IOT_TYPE,
+            MQTT_SETTING_OPERATORS_VERSION: operators_version
+        }
+
+        txPayload = {
+            MQTT_SETTING_FROM_DEVICE_ID: self.client_id,
+            MQTT_SETTING_TOPIC: response_topic,
+            MQTT_SETTING_PAYLOAD: payload,
+            MQTT_SETTING_CMD: MQTT_CMD_OPERATOR_DATA
+        }
+
+        self.client.publish(response_topic, json.dumps(txPayload))
+        self.printMqttComms(f"MQTT TX: {txPayload}")  
+        SYNC_REQUESTED_FROM_DEVICE_ID = ""
+
     # -----------------------------
     # Callbacks
     # -----------------------------
     def on_connect(self, client, userdata, flags, reason_code, properties):
         global TAG_REQUESTED_FROM_DEVICE_ID
-        global FIRE_USER_ID
 
         self.printMqttInfo(f"MQTT Connected: {reason_code}")
         
@@ -149,18 +175,19 @@ class MqttServer:
         self.printMqttInfo(f"MQTT Subscribed: {MQTT_TOPIC_FROM_ANDROID}")
     def on_message(self, client, userdata, msg):
         global TAG_REQUESTED_FROM_DEVICE_ID
-        global FIRE_USER_ID
+        global SYNC_REQUESTED_FROM_DEVICE_ID
+        global SYNC_REQUESTED_FROM_IOT_TYPE
 
-        self.printMqttComms(f"MQTT RX: {msg.payload.decode()}")
-
-        jsondata = json.loads(msg.payload.decode())
-        from_id = jsondata.get(MQTT_JSON_FROM_DEVICE_ID, "")
-        to_id = jsondata.get(MQTT_JSON_TO_DEVICE_ID, "")
-        payload = jsondata.get(MQTT_JSON_PAYLOAD, "")
-        command = jsondata.get(MQTT_JSON_CMD, "")
-        myId = self.client_id
-        
         try:
+            self.printMqttComms(f"MQTT RX: {msg.payload.decode()}")
+       
+            jsondata = json.loads(msg.payload.decode())
+            from_id = jsondata.get(MQTT_SETTING_FROM_DEVICE_ID, "")
+            to_id = jsondata.get(MQTT_SETTING_TO_DEVICE_ID, "")
+            payload = jsondata.get(MQTT_SETTING_PAYLOAD, "")
+            command = jsondata.get(MQTT_SETTING_CMD, "")
+            myId = self.client_id
+
             # From Android
             if(msg.topic == MQTT_TOPIC_FROM_ANDROID):
                 #android_id = requester_id
@@ -174,11 +201,11 @@ class MqttServer:
                     # Make sure only 1 IOT is in discover mode at a time
                     
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: from_id,
-                        MQTT_JSON_TO_DEVICE_ID: "",         # Broadcast
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: payload,
-                        MQTT_JSON_CMD : MQTT_CMD_DISCOVERY
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TO_DEVICE_ID: "",         # Broadcast
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: payload,
+                        MQTT_SETTING_CMD : MQTT_CMD_DISCOVERY
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -190,11 +217,11 @@ class MqttServer:
                     
                     # Build JSON payload
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: from_id,
-                        MQTT_JSON_TO_DEVICE_ID: to_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: payload,
-                        MQTT_JSON_CMD:MQTT_CMD_FOUND_MONITOR
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TO_DEVICE_ID: to_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: payload,
+                        MQTT_SETTING_CMD:MQTT_CMD_FOUND_MONITOR
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -210,14 +237,12 @@ class MqttServer:
                 # Connect to Monitor
                 if(command == MQTT_CMD_CONNECT_MONITOR):
                     
-                    iot_type = payload[SETTING_JSON_IOT_TYPE]
-                    ticks = payload[SETTING_JSON_TICKS_PER_M]
-                    #userId = payload[SETTING_JSON_USER_ID]
-                    #docId = payload[SETTING_JSON_DOC_ID]
-
+                    iot_type = payload[MQTT_SETTING_IOT_TYPE]
+                    ticks = payload[MQTT_SETTING_TICKS_PER_M]
+                   
                     settings = {
-                        SETTING_JSON_IOT_TYPE: iot_type,
-                        SETTING_JSON_TICKS_PER_M: ticks,
+                        MQTT_SETTING_IOT_TYPE: iot_type,
+                        MQTT_SETTING_TICKS_PER_M: ticks,
                         #SETTING_JSON_DOC_ID: docId,
                         #SETTING_JSON_USER_ID: userId,
                     }
@@ -225,11 +250,11 @@ class MqttServer:
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
                     
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: from_id,
-                        MQTT_JSON_TO_DEVICE_ID: to_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: settings,
-                        MQTT_JSON_CMD:MQTT_CMD_CONNECT_MONITOR
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TO_DEVICE_ID: to_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: settings,
+                        MQTT_SETTING_CMD:MQTT_CMD_CONNECT_MONITOR
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -241,10 +266,10 @@ class MqttServer:
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
                     
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: from_id,
-                        MQTT_JSON_TO_DEVICE_ID: to_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_CMD:MQTT_CMD_DISCONNECT_MONITOR
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TO_DEVICE_ID: to_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_CMD:MQTT_CMD_DISCONNECT_MONITOR
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -255,10 +280,10 @@ class MqttServer:
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
                     
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: myId,
-                        MQTT_JSON_TO_DEVICE_ID: from_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_CMD:MQTT_CMD_PING
+                        MQTT_SETTING_FROM_DEVICE_ID: myId,
+                        MQTT_SETTING_TO_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_CMD:MQTT_CMD_PING
                     }
 
                     client.publish(response_topic, json.dumps(txPayload))
@@ -271,22 +296,16 @@ class MqttServer:
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
                     
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: myId,
-                        MQTT_JSON_TO_DEVICE_ID: from_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_CMD:MQTT_CMD_CONNECT_BASE
+                        MQTT_SETTING_FROM_DEVICE_ID: myId,
+                        MQTT_SETTING_TO_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_CMD:MQTT_CMD_CONNECT_BASE
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
 
-                    FIRE_USER_ID = payload.get(SETTING_JSON_USER_ID, "")
-                    if FIRE_USER_ID == "":
-                        print(f"No User ID found. Connect Andoid app to Base Station first.")
-                        return
-    
                     # Start Queue for pushing operator list to firestore
-                    print(f"User ID: {FIRE_USER_ID}")
                     try:
                         self.queue.put_nowait(jsondata)
                     except Full:
@@ -298,10 +317,10 @@ class MqttServer:
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
                     
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: myId,
-                        MQTT_JSON_TO_DEVICE_ID: from_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_CMD:MQTT_CMD_PING
+                        MQTT_SETTING_FROM_DEVICE_ID: myId,
+                        MQTT_SETTING_TO_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_CMD:MQTT_CMD_PING
                     }
 
                     TAG_REQUESTED_FROM_DEVICE_ID = from_id
@@ -328,10 +347,10 @@ class MqttServer:
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
                     
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: from_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: "",
-                        MQTT_JSON_CMD:MQTT_CMD_DISCOVERY
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: "",
+                        MQTT_SETTING_CMD:MQTT_CMD_DISCOVERY
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -342,10 +361,10 @@ class MqttServer:
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
                      
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: from_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: "",
-                        MQTT_JSON_CMD:MQTT_CMD_ACK
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: "",
+                        MQTT_SETTING_CMD:MQTT_CMD_ACK
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -356,60 +375,59 @@ class MqttServer:
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{from_id}"
                      
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: myId,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: "",
-                        MQTT_JSON_CMD:MQTT_CMD_PING
+                        MQTT_SETTING_FROM_DEVICE_ID: myId,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: "",
+                        MQTT_SETTING_CMD:MQTT_CMD_PING
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
      
-                # IOT Data 
+                # Live Monitor Data
                 if(command == MQTT_CMD_LIVE_MONITOR_DATA):                 
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
                      
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: from_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: payload,
-                        MQTT_JSON_CMD:MQTT_CMD_LIVE_MONITOR_DATA
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: payload,
+                        MQTT_SETTING_CMD:MQTT_CMD_LIVE_MONITOR_DATA
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
 
-                # Measurement Data (Push to Cloud)
+                # IOT Data (Push to Cloud)
                 if(command == MQTT_CMD_IOT_DATA):                 
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{from_id}"
-                    
-                    try:
-                        self.queue.put_nowait(jsondata) # Queue for processing in main loop (to avoid doing heavy processing in callback)
-                        print(f"Queue enqueued command={jsondata.get(MQTT_JSON_CMD)}")
-                    except Full:
-                        self.queue.get_nowait()   # discard oldest
-                        self.queue.put_nowait(jsondata)
-                        print(f"Queue full; discarded oldest and enqueued command={jsondata.get(MQTT_JSON_CMD)}")
-    
+                        
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: from_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: "",
-                        MQTT_JSON_CMD: MQTT_CMD_ACK
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: "",
+                        MQTT_SETTING_CMD: MQTT_CMD_ACK
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printMqttComms(f"MQTT TX: {txPayload}")        
+                    self.printMqttComms(f"MQTT TX: {txPayload}")    
 
+                    # Queue for processing in main loop (to avoid doing heavy processing in callback)
+                    try:
+                        self.queue.put_nowait(jsondata) 
+                    except Full:
+                        self.queue.get_nowait()   # discard oldest
+                        self.queue.put_nowait(jsondata)
+    
                 # Connect  (IOT to Android)
                 if(command == MQTT_CMD_CONNECT_MONITOR):                 
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
                      
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: from_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: "",
-                        MQTT_JSON_CMD:MQTT_CMD_CONNECT_MONITOR
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: "",
+                        MQTT_SETTING_CMD:MQTT_CMD_CONNECT_MONITOR
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -420,10 +438,10 @@ class MqttServer:
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
                      
                     txPayload = {
-                        MQTT_JSON_FROM_DEVICE_ID: from_id,
-                        MQTT_JSON_TOPIC: response_topic,
-                        MQTT_JSON_PAYLOAD: "",
-                        MQTT_JSON_CMD:MQTT_CMD_DISCONNECT_MONITOR
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: "",
+                        MQTT_SETTING_CMD:MQTT_CMD_DISCONNECT_MONITOR
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
@@ -436,17 +454,44 @@ class MqttServer:
                         response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{TAG_REQUESTED_FROM_DEVICE_ID}"
                         
                         txPayload = {
-                            MQTT_JSON_FROM_DEVICE_ID: from_id,
-                            MQTT_JSON_TOPIC: response_topic,
-                            MQTT_JSON_PAYLOAD: payload,
-                            MQTT_JSON_CMD:MQTT_CMD_TAG_DATA
+                            MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                            MQTT_SETTING_TOPIC: response_topic,
+                            MQTT_SETTING_PAYLOAD: payload,
+                            MQTT_SETTING_CMD:MQTT_CMD_TAG_DATA
                         }
             
                         client.publish(response_topic, json.dumps(txPayload))
                         self.printMqttComms(f"MQTT TX: {txPayload}")
      
-        except json.JSONDecodeError:  
-            print(f"Invalid JSON received {self.client_id}")
+                # Sync 
+                if(command == MQTT_CMD_SYNC):    
+                    response_topic = f"{MQTT_TOPIC_TO_IOT}/{from_id}"
+                    SYNC_REQUESTED_FROM_DEVICE_ID = from_id
+                    SYNC_REQUESTED_FROM_IOT_TYPE = payload.get(MQTT_SETTING_IOT_TYPE, "")
+
+                    txPayload = {
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: "",
+                        MQTT_SETTING_CMD: MQTT_CMD_SYNC
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")     
+    
+                    # Queue for processing in main loop (to avoid doing heavy processing in callback)
+                    try:
+                        self.queue.put_nowait(jsondata) 
+                    except Full:
+                        self.queue.get_nowait()   # discard oldest
+                        self.queue.put_nowait(jsondata)
+        
+        except Exception as e:
+            print(f"MQTT Error: {self.client_id}: {e}")
+            return
+        
+        except json.JSONDecodeError as e:  
+            print(f"Invalid JSON received {self.client_id}: {e}")
             return
     def on_disconnect(self, client, userdata, rc, properties=None):
         print(f"MQTT Disconnected: {rc}")

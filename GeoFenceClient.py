@@ -15,7 +15,9 @@ import re
 import MqttService
 import WifiCredentials
 from WifiCredentials import parser as wifi_parser
-import os   
+import os
+import time
+import threading
 from datetime import datetime, timezone
 from queue import Empty
 import pickle  # For binary file operations
@@ -74,10 +76,10 @@ IOT_TYPE_STATIONARY_MACHINE = "Stationary Machine"
 IOT_TYPE_WHEEL = "Distance Wheel"
 
 # Payload Settings
-JSON_SET_OPERATOR = "operator"
-JSON_SET_SUPERVISOR = "supervisor"
-JSON_SET_DISTANCE = "distance"
-JSON_SET_LINES = "lines"  
+JSON_WHEEL_OPERATOR = "operator"
+JSON_WHEEL_SUPERVISOR = "supervisor"
+JSON_WHEEL_DISTANCE = "distance"
+JSON_WHEEL_LINES = "lines"  
 JSON_SET_TIMESTAMP = "timestamp"  
 JSON_USER_DOC_ID = "userDocId"  
 JSON_MONITOR_DOC_ID = "monDocId"  
@@ -97,18 +99,18 @@ FIRE_SET_IP_ADR = "IPAdress"
 FIRE_SET_IP_LAST_CON = "LastConnected"
 
 # (Firsetore) General Settings
-FIRE_SET_IMAGE = "image"
-FIRE_SET_MON_TYPE = "iotType"
-FIRE_SET_MON_NAME = "iotName"
-FIRE_SET_MON_ID = "monDocId"
-FIRE_SET_USER_DOC_ID = "userDocId"
+FIRE_SETTING_IMAGE = "image"
+FIRE_SETTING_MON_TYPE = "iotType"
+FIRE_SETTING_MON_NAME = "iotName"
+FIRE_SETTING_MON_ID = "monDocId"
+FIRE_SETTING_USER_DOC_ID = "userDocId"
+FIRE_TIMESTAMP = "timestamp"
 
 # (Firsetore) Distance Wheel
 FIRE_WHEEL_OPERATOR = "operator"
 FIRE_WHEEL_SUPERVISOR = "supervisor"
 FIRE_WHEEL_DISTANCE = "distance"
 FIRE_WHEEL_LINES = "lines"
-FIRE_WHEEL_TIMESTAMP = "timestamp"
 FIRE_WHEEL_LAST_LOG_TIMESTAMP = "lastLogTimestamp"
 
 # (Firsetore) Operators
@@ -118,17 +120,83 @@ FIRE_OPERATOR_SURNAME = "surname"
 FIRE_OPERATOR_ACCESS_LEVEL = "accessLevel"
 FIRE_OPERATOR_TAG_ID = "tagId"
 
-mqtt_broker = MqttService.MqttServer() 
 cred = credentials.Certificate(os.path.expanduser("~/Secure/ServiceAccountKey.json"))
 firebase_admin.initialize_app(cred)
 dbFire = firestore.client()
-operators_version = "0"
+operators_version = None
+operators_version_watch = None
+operators_version_listener_uid = None
 operators_version_file = os.path.expanduser("~/Secure/operator_version.bin")
 operators_data_file = os.path.expanduser("~/Secure/operators.bin")
 uid_data_file = os.path.expanduser("~/Secure/uid.bin")
+iot_offline_file = os.path.expanduser("~/Secure/iot_offline_queue.bin")
+
+# Firestore write tuning (kept short so a network blip doesn't freeze the device for 60s)
+FIRESTORE_WRITE_TIMEOUT = 15  # seconds, per attempt
+FIRESTORE_RETRY_BACKOFF = (1, 3, 9)  # delays between attempts; len = retries after first try
+FIRESTORE_OFFLINE_QUEUE_MAX = 5000  # cap so disk doesn't grow forever
   
 # Debug
 PRINT_DEBUG_ENABLED = False
+
+def on_snapshot(doc_snapshot, changes, read_time):
+    global operators_version
+
+    for doc in doc_snapshot:
+        data = doc.to_dict()
+        current_version = data.get(FIRE_OPERATOR_VERSION)
+
+        # First load: just store value
+        if operators_version is None:
+            operators_version = current_version
+            print("Initial version:", current_version)
+            return
+
+        # Only trigger if version increased
+        if current_version is not None and current_version > operators_version:
+            print(f"Version updated: {operators_version} → {current_version}")
+
+            # ✅ YOUR CUSTOM ACTION HERE
+            run_update_logic(current_version)
+
+            # update stored version
+            operators_version = current_version
+def run_update_logic(new_version):
+    print(f"Running update logic for version {new_version}")
+    # Put your real work here (reload config, restart process, etc.)
+
+def start_operators_version_listener(uid):
+    """Attach Firestore snapshot listener for operatorsVer; safe to call repeatedly (same uid no-op)."""
+    global operators_version_watch, operators_version_listener_uid, operators_version
+
+    if uid is None:
+        return False
+    uid = str(uid).strip()
+    if len(uid) < 28:
+        print("\nCloud listener not started: No UID. (Connect Android to BASE).")
+        return False
+
+    if operators_version_watch is not None and operators_version_listener_uid == uid:
+        return False
+
+    try:
+        if operators_version_watch is not None:
+            operators_version_watch.unsubscribe()
+        operators_version_watch = None
+        operators_version_listener_uid = None
+
+        operators_version = None
+        doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(uid)
+        operators_version_watch = doc_ref.on_snapshot(on_snapshot)
+        operators_version_listener_uid = uid
+        print(f"Cloud listener started on: {uid}")
+        return True
+    except Exception as e:
+        print(f"Operator listener ERROR: {e}")
+        operators_version_watch = None
+        operators_version_listener_uid = None
+        return False
+
 
 # Methods
 def checkWifiConnection():
@@ -144,10 +212,11 @@ def checkWifiConnection():
             printDebug(f"WIFI Connected: {ssid}")
         else:
             printDebug("No WIFI Connection")
-
+        
+        return ssid
     except subprocess.CalledProcessError as e:
         print(f"Error: checkWifiConnection {e}")
-    return ssid 
+        return None
 def printDebug(msg):
     if PRINT_DEBUG_ENABLED:
         print(msg)
@@ -281,74 +350,226 @@ def fire_read_ip_adr(bt_name=""):
         print(f"ERROR: fire_read_ip_adr(), reading from Firestore: {e}") 
 
     return "0.0.0.0"
-def fire_write_iot_data(payload):  
+
+
+# Lock guards the on-disk offline queue against concurrent access.
+# Today only the main loop writes to it, but firestore listeners run on
+# their own thread, so cheap insurance.
+_iot_queue_lock = threading.Lock()
+
+
+def _iot_queue_load():
+    """Return list of pending writes; empty list if file is missing or unreadable."""
+    if not os.path.exists(iot_offline_file):
+        return []
     try:
-        # Time stamp
-        epoch = payload.get(FIRE_SET_TIMESTAMP)  # safe get
-        if epoch is None:
-            print("Warning: timestamp missing, using current UTC time")
-            tStamp = datetime.now(timezone.utc)
-        else:
-            tStamp = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        with open(iot_offline_file, 'rb') as f:
+            data = pickle.load(f)
+        if isinstance(data, list):
+            return data
+        print(f"Warning: offline queue file has unexpected type {type(data).__name__}, discarding")
+    except Exception as e:
+        print(f"ERROR: _iot_queue_load: {e}")
+    return []
+
+
+def _iot_queue_save(entries):
+    """Atomic write so a power loss mid-save can't corrupt the queue."""
+    tmp = iot_offline_file + ".tmp"
+    try:
+        with open(tmp, 'wb') as f:
+            pickle.dump(entries, f)
+        os.replace(tmp, iot_offline_file)
+    except Exception as e:
+        print(f"ERROR: _iot_queue_save: {e}")
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
+def _iot_queue_append(entry):
+    with _iot_queue_lock:
+        queue = _iot_queue_load()
+        # Cap queue size so a long outage can't fill the disk.
+        if len(queue) >= FIRESTORE_OFFLINE_QUEUE_MAX:
+            dropped = len(queue) - FIRESTORE_OFFLINE_QUEUE_MAX + 1
+            print(f"Warning: offline queue at cap, dropping {dropped} oldest entries")
+            queue = queue[dropped:]
+        queue.append(entry)
+        _iot_queue_save(queue)
+        printDebug(f"Offline queue size: {len(queue)}")
+
+
+def _commit_wheel_write(userDocId, monDocId, doc, tStamp):
+    """Build and commit the wheel batch with a short timeout. Returns True on success."""
+    batch = dbFire.batch()
+
+    iot_doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId) \
+        .collection(FIRE_COLLECT_MONITORS).document(monDocId) \
+        .collection(FIRE_COLLECT_IOT_DATA).document()
+    batch.set(iot_doc_ref, doc, merge=False)
+
+    mon_doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId) \
+        .collection(FIRE_COLLECT_MONITORS).document(monDocId)
+    batch.set(mon_doc_ref, {FIRE_WHEEL_LAST_LOG_TIMESTAMP: tStamp}, merge=True)
+
+    batch.commit(timeout=FIRESTORE_WRITE_TIMEOUT)
+    return True
+
+
+def _commit_with_retry(userDocId, monDocId, doc, tStamp):
+    """Try the write up to 1 + len(FIRESTORE_RETRY_BACKOFF) times. Returns True on success."""
+    attempts = 1 + len(FIRESTORE_RETRY_BACKOFF)
+    for i in range(attempts):
+        try:
+            return _commit_wheel_write(userDocId, monDocId, doc, tStamp)
+        except Exception as e:
+            is_last = (i == attempts - 1)
+            if is_last:
+                print(f"ERROR: firestore commit failed after {attempts} attempts: {type(e).__name__}: {e}")
+                return False
+            delay = FIRESTORE_RETRY_BACKOFF[i]
+            print(f"Warning: firestore commit attempt {i + 1}/{attempts} failed ({type(e).__name__}: {e}), retrying in {delay}s")
+            time.sleep(delay)
+    return False
+
+
+def _iot_queue_flush():
+    """One attempt per queued entry; stop on first failure to avoid a long block."""
+    with _iot_queue_lock:
+        queue = _iot_queue_load()
+        if not queue:
+            return
+
+        printDebug(f"Flushing {len(queue)} queued IoT writes")
+        remaining = list(queue)
+        flushed = 0
+        while remaining:
+            userDocId, monDocId, doc, tStamp = remaining[0]
+            try:
+                _commit_wheel_write(userDocId, monDocId, doc, tStamp)
+                remaining.pop(0)
+                flushed += 1
+            except Exception as e:
+                print(f"Warning: queue flush stopped at entry {flushed} ({type(e).__name__}: {e}); {len(remaining)} remain")
+                break
+
+        if flushed:
+            print(f"Flushed {flushed} queued IoT writes; {len(remaining)} remain")
+        _iot_queue_save(remaining)
+
+
+def _resolve_timestamp(epoch):
+    """Returns a timezone-aware UTC datetime; falls back to now() on garbage/missing/out-of-range."""
+    if epoch is None:
+        return datetime.now(timezone.utc)
+    try:
+        epoch_int = int(str(epoch).strip())
+    except (ValueError, TypeError):
+        print(f"Warning: invalid timestamp {epoch!r}, using current UTC time")
+        return datetime.now(timezone.utc)
+
+    # Auto-detect ms vs s: anything >= 1e12 is treated as milliseconds.
+    epoch_sec = epoch_int // 1000 if epoch_int >= 1_000_000_000_000 else epoch_int
+
+    # Valid range: ~2023-11-14 (1700000000) to ~2099-01-01 (4070908800)
+    if 1_700_000_000 <= epoch_sec <= 4_070_908_800:
+        return datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
+
+    print(f"Warning: timestamp {epoch_int} out of range, using current UTC time")
+    return datetime.now(timezone.utc)
+
+
+def fire_write_iot_data(payload):
+    """Synchronous Firestore write. Designed to be called via asyncio.to_thread()."""
+    try:
+        tStamp = _resolve_timestamp(payload.get(FIRE_TIMESTAMP))
 
         iotType = payload.get(JSON_IOT_TYPE)
         monDocId = payload.get(JSON_MONITOR_DOC_ID)
         userDocId = payload.get(JSON_USER_DOC_ID)
-        
+
         if not userDocId or not monDocId:
             print("ERROR: Missing userDocId or monDocId")
             return
 
-        # Add IOT Log Data 
-        if(iotType == IOT_TYPE_WHEEL):
-
-            batch = dbFire.batch()
-
-            iot_doc = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId)\
-                .collection(FIRE_COLLECT_MONITORS).document(monDocId)\
-                .collection(FIRE_COLLECT_IOT_DATA)\
-                .document()
-            
-            doc = {
-                FIRE_SET_DISTANCE: payload.get(JSON_SET_DISTANCE, 0.0),
-                FIRE_SET_LINES: payload.get(JSON_SET_LINES, 0),
-                FIRE_WHEEL_OPERATOR: payload.get(JSON_SET_OPERATOR, "none"),
-                FIRE_WHEEL_SUPERVISOR: payload.get(JSON_SET_SUPERVISOR, "none"),
-                FIRE_SET_TIMESTAMP: tStamp
-            }
-            
-            batch.set(iot_doc, doc, merge=False)
-
-            # Set Monitor Data - Timestamp
-            mon_doc = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId) \
-                            .collection(FIRE_COLLECT_MONITORS).document(monDocId)
-
-            batch.set(mon_doc, {FIRE_SET_LAST_LOG_TIMESTAMP: tStamp}, merge=True)
-            batch.commit()
-            
-            printDebug(f"Firestore Write: {payload}")
-        else:
+        if iotType != IOT_TYPE_WHEEL:
             printDebug(f"Unknown Test Type: {iotType}")
+            return
+
+        try:
+            distance = float(str(payload.get(JSON_WHEEL_DISTANCE, 0)).strip())
+        except (ValueError, TypeError):
+            print(f"Warning: invalid distance {payload.get(JSON_WHEEL_DISTANCE)!r}, defaulting to 0.0")
+            distance = 0.0
+
+        try:
+            lines = int(float(str(payload.get(JSON_WHEEL_LINES, 0)).strip()))
+        except (ValueError, TypeError):
+            print(f"Warning: invalid lines {payload.get(JSON_WHEEL_LINES)!r}, defaulting to 0")
+            lines = 0
+
+        doc = {
+            FIRE_WHEEL_DISTANCE: distance,
+            FIRE_WHEEL_LINES: lines,
+            FIRE_WHEEL_OPERATOR: payload.get(JSON_WHEEL_OPERATOR, "none"),
+            FIRE_WHEEL_SUPERVISOR: payload.get(JSON_WHEEL_SUPERVISOR, "none"),
+            FIRE_TIMESTAMP: tStamp
+        }
+
+        if _commit_with_retry(userDocId, monDocId, doc, tStamp):
+            printDebug(f"Firestore Write: {payload}")
+            # Opportunistically flush anything that piled up during prior outages.
+            _iot_queue_flush()
+        else:
+            # Capture-time tStamp is preserved so flushed writes keep their original time.
+            _iot_queue_append((userDocId, monDocId, doc, tStamp))
+            print("Queued IoT write for later retry")
 
     except Exception as e:
-        print(f"ERROR: fire_write_iot_data: {e}")
+        print(f"ERROR: fire_write_iot_data: {type(e).__name__}: {e}")
+def read_user_id_from_file():
+    global uid_data_file
 
-# Operators List Methods
-def read_local_operators_version():
+    user_id = ""
+    if os.path.exists(uid_data_file):
+        try:
+            with open(uid_data_file, 'rb') as f:
+                user_id = pickle.load(f)
+                printDebug(f"Read User ID from file: {user_id}")
+    
+        except Exception as e:
+            print(f"read_user_id_from_file(): {e}")
+            user_id = ""
+    
+    return user_id
+def write_user_id_to_file(uid):
+    global uid_data_file
+
+    try:
+        with open(uid_data_file, 'wb') as f:
+            pickle.dump(uid, f)
+            printDebug(f"Saved User ID to file: {uid}")
+    except Exception as e:
+        print(f"ERROR: write_uid_to_file(), {e}")
+
+#  Operators 
+def read_local_operators_ver_from_file():
     global operators_version_file
-    local_version = "0"
-   
+    opVer = "0"
+    
     if os.path.exists(operators_version_file):
         try:
             with open(operators_version_file, 'rb') as f:
-                local_version = pickle.load(f)
+                opVer = pickle.load(f)
     
         except Exception as e:
             print(f"fire_read_operators_version(): {e}")
-            local_version = "0"
     
-    return local_version
-def sync_local_operators_list():
+    return opVer
+def read_local_operators_from_file():
     global operators_data_file
     operators = []
     if os.path.exists(operators_data_file):
@@ -360,16 +581,16 @@ def sync_local_operators_list():
             print(f"read_local_operators_list(): {e}")
             operators = []
     
-    if operators:
-        mqtt_broker.syncIot(operators)
-        
+    return operators    
 def fire_read_operators_version():
     try:
-        if(len(MqttService.FIRE_USER_ID) < 28):  # Firestore User Doc IDs are 28 chars long
+        uid = read_user_id_from_file()
+
+        if(len(uid) < 28):  # Firestore User Doc IDs are 28 chars long
             print("Cant sync operator list. No User ID found. Connect Android app to Base Station")
             return "0"
             
-        version_doc = dbFire.collection(FIRE_COLLECT_USERS).document(MqttService.FIRE_USER_ID)
+        version_doc = dbFire.collection(FIRE_COLLECT_USERS).document(uid)
         user_snapshot = version_doc.get()
         
         version = "0"
@@ -377,7 +598,7 @@ def fire_read_operators_version():
             user_data = user_snapshot.to_dict()
             version = user_data.get(FIRE_OPERATOR_VERSION, 0)
         else:
-            dbFire.collection(FIRE_COLLECT_USERS).document(MqttService.FIRE_USER_ID).set({FIRE_OPERATOR_VERSION: version})
+            dbFire.collection(FIRE_COLLECT_USERS).document(uid).set({FIRE_OPERATOR_VERSION: version})
         
         return version
     
@@ -405,27 +626,26 @@ def fire_read_operators(userId=""):
     except Exception as e:
         print(f"ERROR: fire_read_operators(): {e}")
         return []
-def fire_sync_operator_list():
+def fire_sync_operator_list(iot_operators_version = "0"):
     global operators_version_file
     global operators_data_file
 
     try:
-        if(len(MqttService.FIRE_USER_ID) < 28):  # Firestore User Doc IDs are 28 chars long
+        uid = read_user_id_from_file()
+
+        if(len(uid) < 28):  # Firestore User Doc IDs are 28 chars long
             print("Cant sync operator list. No User ID found. Connect Android app to Base Station")
             return "0"
         
-        print(f"Syncing operators for UID: {MqttService.FIRE_USER_ID}...")
+        print(f"Syncing operators for UID: {uid}...")
         
-        # Get Operators Version
         fire_operator_ver = fire_read_operators_version()
-        local_operator_ver = read_local_operators_version()    
-
-        if(fire_operator_ver == local_operator_ver):
+        if(fire_operator_ver == iot_operators_version):
             print("Up to Date.")
-            return
+            return False
         
         # Get Operators
-        operators = fire_read_operators(MqttService.FIRE_USER_ID)
+        operators = fire_read_operators(uid)
     
         if operators:
             operator_data = []
@@ -437,30 +657,31 @@ def fire_sync_operator_list():
                     FIRE_OPERATOR_TAG_ID: op.get(FIRE_OPERATOR_TAG_ID, "")
                 })
             
-            # Save to binary file
-           
+            # Save Local Operators List
             with open(operators_data_file, 'wb') as f:
                 pickle.dump(operator_data, f)
             
             print(f"Saved {len(operator_data)} operators to {operators_data_file}")
         
-        # Create new version from timestamp
+        # Create new operators version
         new_version = str(int(datetime.now(timezone.utc).timestamp()))  
         
-        # Save version to local bin file
+        # Save Local operators version
         with open(operators_version_file, 'wb') as f:
             pickle.dump(new_version, f)
         
-        # Update Firestore with new version
+        # Save Firestore operators version
         dbFire.collection(FIRE_COLLECT_USERS)\
-            .document(MqttService.FIRE_USER_ID)\
+            .document(uid)\
             .set({FIRE_OPERATOR_VERSION: new_version}, merge=True )
 
         print(f"Updated version to: {new_version}")
-   
+        return True
+    
     except Exception as e:
         print(f"ERROR: sync_operator_list: {e}")
-
+        return False
+    
 # Bluetooth Methods
 async def bt_discover():
     global lstBtConnectedDevices
@@ -636,8 +857,11 @@ async def main():
     global BT_NAME
     global IP_ADDRESS
     global mqtt_broker
-    wifiConnected = False
     casePtr = 0
+
+    # Firestore operator-version listener: start if UID already on disk, else after MQTT #CONNECT_BAS
+    uid = read_user_id_from_file()
+    start_operators_version_listener(uid)
 
     while True:
         match casePtr:
@@ -665,12 +889,10 @@ async def main():
                 casePtr+=1
             
             # Save IP to Firestore
-            # Sync Operators List from Firestore
             case 2:
                 if(fire_sync_ip_address(IP_ADDRESS)):
                     print(f"Update Firestore IP: {IP_ADDRESS}")
                 
-                fire_sync_operator_list()
                 casePtr+=1
             
             # Get Wifi Credenitials
@@ -688,13 +910,13 @@ async def main():
 
             # Start MQTT Service
             case 5:
-                # mqtt_broker = MqttService.MqttServer(
-                #     client_id = BT_NAME,
-                #     broker_ip = IP_ADDRESS,
-                # )
+                mqtt_broker = MqttService.MqttServer(
+                     client_id = BT_NAME,
+                     broker_ip = IP_ADDRESS,
+                )
                 
-                mqtt_broker.client_id = BT_NAME
-                mqtt_broker.broker_ip = IP_ADDRESS 
+                #mqtt_broker.client_id = BT_NAME
+                #mqtt_broker.broker_ip = IP_ADDRESS 
                 await mqtt_broker.connectMqtt()
                 casePtr+=1
             
@@ -705,29 +927,37 @@ async def main():
                     if not mqtt_broker.queue.empty():
                         message = mqtt_broker.queue.get_nowait()
 
-                        command = message.get(MqttService.MQTT_JSON_CMD, "")
-                        payload = message.get(MqttService.MQTT_JSON_PAYLOAD, {})
-                        print(f"Queue: {command}")
+                        command = message.get(MqttService.MQTT_SETTING_CMD, "")
+                        payload = message.get(MqttService.MQTT_SETTING_PAYLOAD, {})
                         
+                        # IOT Data - off-loaded to a worker thread so a Firestore network
+                        # blip can't freeze the BLE/MQTT event loop for up to FIRESTORE_WRITE_TIMEOUT
+                        # x (1 + len(FIRESTORE_RETRY_BACKOFF)) seconds.
                         if command == MqttService.MQTT_CMD_IOT_DATA:
-                            fire_write_iot_data(payload)
+                            asyncio.create_task(asyncio.to_thread(fire_write_iot_data, payload))
                         
+                        # Connect Base
                         elif command == MqttService.MQTT_CMD_CONNECT_BASE:
-                            iot_type = payload.get(MqttService.SETTING_JSON_IOT_TYPE, "")
+                            iot_type = payload.get(MqttService.MQTT_SETTING_IOT_TYPE, "")
+                            uid = payload.get(MqttService.MQTT_SETTING_USER_ID, "")
                             
                             if iot_type == IOT_TYPE_WHEEL:
-                                with open(uid_data_file, 'wb') as f:
-                                    pickle.dump(MqttService.FIRE_USER_ID, f)
-                                    printDebug(f"Saved User ID for Firestore: {MqttService.FIRE_USER_ID}")
-                                fire_sync_operator_list()
+                                write_user_id_to_file(uid)
+                            if len(str(uid or "").strip()) >= 28:
+                                start_operators_version_listener(uid)
                      
+                        # Sync IOT
                         elif command == MqttService.MQTT_CMD_SYNC:
-                            iot_type = payload.get(MqttService.SETTING_JSON_IOT_TYPE, "")
+                            iot_type = payload.get(MqttService.MQTT_SETTING_IOT_TYPE, "")
+                            iot_operator_version = payload.get(MqttService.MQTT_SETTING_OPERATORS_VERSION, "")
                             
+                            # Sync Operators
                             if iot_type == IOT_TYPE_WHEEL:
-                                fire_sync_operator_list()
-                                operators = read_local_operators_list()
-                                mqtt_broker.syncIot(operators)
+                                if fire_sync_operator_list(iot_operator_version):
+                                    operators = read_local_operators_from_file()
+                                    if operators:
+                                        #new_operator_version = read_local_operators_ver_from_file()
+                                        mqtt_broker.sendOperators(operators, operators_version)
                      
                 except Empty:
                     pass
