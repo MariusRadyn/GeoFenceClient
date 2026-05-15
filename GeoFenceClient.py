@@ -18,9 +18,12 @@ from WifiCredentials import parser as wifi_parser
 import os
 import time
 import threading
+import uuid
 from datetime import datetime, timezone
 from queue import Empty
 import pickle  # For binary file operations
+from dataclasses import dataclass
+from typing import List, Optional
 #import paho.mqtt.client as mqtt
 
 
@@ -82,9 +85,12 @@ JSON_WHEEL_DISTANCE = "distance"
 JSON_WHEEL_LINES = "lines"  
 JSON_SET_TIMESTAMP = "timestamp"  
 JSON_USER_DOC_ID = "userDocId"  
-JSON_MONITOR_DOC_ID = "monDocId"  
+JSON_MONITOR_DOC_ID = "monDocId"
+JSON_MONITOR_DEVICE_ID = "monitorId"
 JSON_IOT_TYPE = "iotType" 
-JSON_IOT_NAME = "iotName" 
+JSON_IOT_NAME = "iotName"
+# Optional: stable id for this reading so Firestore upserts the same doc on retry (1–128 chars: [A-Za-z0-9_-]).
+JSON_IOT_WRITE_ID = "iotWriteId"
 
 # Firestore
 TARGET_PREFIX = "iOT"
@@ -100,11 +106,13 @@ FIRE_SET_IP_LAST_CON = "LastConnected"
 
 # (Firsetore) General Settings
 FIRE_SETTING_IMAGE = "image"
-FIRE_SETTING_MON_TYPE = "iotType"
+FIRE_SETTING_MON_TYPE = "type"
 FIRE_SETTING_MON_NAME = "iotName"
 FIRE_SETTING_MON_ID = "monDocId"
 FIRE_SETTING_USER_DOC_ID = "userDocId"
 FIRE_TIMESTAMP = "timestamp"
+# Client-generated id; used as the Firestore document id under iotData so retries cannot duplicate rows.
+FIRE_IOT_WRITE_ID = "iotWriteId"
 
 # (Firsetore) Distance Wheel
 FIRE_WHEEL_OPERATOR = "operator"
@@ -120,16 +128,39 @@ FIRE_OPERATOR_SURNAME = "surname"
 FIRE_OPERATOR_ACCESS_LEVEL = "accessLevel"
 FIRE_OPERATOR_TAG_ID = "tagId"
 
+# (Firsetore) Monitors
+FIRE_MONITOR_NAME = "name"
+FIRE_MONITOR_IMAGE_URL = "imageURL"
+FIRE_MONITOR_IMAGE_FILENAME = "imageFilename"
+FIRE_MONITOR_ID = "monitorId"
+
+
+@dataclass
+class MONITOR_DATA:
+    mon_doc_id: str = ""
+    mon_device_id: str = ""
+    mon_name: str = ""
+    image_url: str = ""
+    image_filename: str = ""
+    mon_: str = ""
+    mon_type: str = ""
+
+
+MONITOR_DATA_LIST: List[MONITOR_DATA] = []
+
 cred = credentials.Certificate(os.path.expanduser("~/Secure/ServiceAccountKey.json"))
 firebase_admin.initialize_app(cred)
 dbFire = firestore.client()
 operators_version = None
-operators_version_watch = None
+operators_version_doc_ref = None
 operators_version_listener_uid = None
 operators_version_file = os.path.expanduser("~/Secure/operator_version.bin")
 operators_data_file = os.path.expanduser("~/Secure/operators.bin")
 uid_data_file = os.path.expanduser("~/Secure/uid.bin")
 iot_offline_file = os.path.expanduser("~/Secure/iot_offline_queue.bin")
+
+monitors_listener_uid = None
+monitors_doc_ref = None
 
 # Firestore write tuning (kept short so a network blip doesn't freeze the device for 60s)
 FIRESTORE_WRITE_TIMEOUT = 15  # seconds, per attempt
@@ -137,9 +168,10 @@ FIRESTORE_RETRY_BACKOFF = (1, 3, 9)  # delays between attempts; len = retries af
 FIRESTORE_OFFLINE_QUEUE_MAX = 5000  # cap so disk doesn't grow forever
   
 # Debug
-PRINT_DEBUG_ENABLED = False
+PRINT_DEBUG_ENABLED = True
 
-def on_snapshot(doc_snapshot, changes, read_time):
+# Firestore Listeners
+def on_snapshot_operator(doc_snapshot, changes, read_time):
     global operators_version
 
     for doc in doc_snapshot:
@@ -156,46 +188,122 @@ def on_snapshot(doc_snapshot, changes, read_time):
         if current_version is not None and current_version > operators_version:
             print(f"Version updated: {operators_version} → {current_version}")
 
-            # ✅ YOUR CUSTOM ACTION HERE
-            run_update_logic(current_version)
-
             # update stored version
             operators_version = current_version
-def run_update_logic(new_version):
-    print(f"Running update logic for version {new_version}")
-    # Put your real work here (reload config, restart process, etc.)
-
 def start_operators_version_listener(uid):
     """Attach Firestore snapshot listener for operatorsVer; safe to call repeatedly (same uid no-op)."""
-    global operators_version_watch, operators_version_listener_uid, operators_version
-
+    global operators_version_doc_ref, operators_version_listener_uid, operators_version
+    
+    printDebug(f"\nStarting operators listener ...")
+    
     if uid is None:
+        print("\nCloud listener not started: No UID. (Connect Android to BASE).")
         return False
     uid = str(uid).strip()
     if len(uid) < 28:
         print("\nCloud listener not started: No UID. (Connect Android to BASE).")
         return False
 
-    if operators_version_watch is not None and operators_version_listener_uid == uid:
+    if operators_version_doc_ref is not None and operators_version_listener_uid == uid:
         return False
 
     try:
-        if operators_version_watch is not None:
-            operators_version_watch.unsubscribe()
-        operators_version_watch = None
+        if operators_version_doc_ref is not None:
+            operators_version_doc_ref.unsubscribe()
+        operators_version_doc_ref = None
         operators_version_listener_uid = None
 
         operators_version = None
         doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(uid)
-        operators_version_watch = doc_ref.on_snapshot(on_snapshot)
+        operators_version_doc_ref = doc_ref.on_snapshot(on_snapshot_operator)
         operators_version_listener_uid = uid
-        print(f"Cloud listener started on: {uid}")
+        printDebug(f"Operator Cloud listener started on: {uid}")
         return True
     except Exception as e:
         print(f"Operator listener ERROR: {e}")
-        operators_version_watch = None
+        operators_version_doc_ref = None
         operators_version_listener_uid = None
         return False
+
+def on_snapshot_monitors(doc_snapshot, changes, read_time):
+    global MONITOR_DATA_LIST
+
+    MONITOR_DATA_LIST.clear()
+    
+    for doc in doc_snapshot:
+        if not doc.exists:
+            continue
+        data = doc.to_dict()
+        if not data:
+            continue
+
+        mon_id = doc.id
+        mon_device_id = data.get(FIRE_MONITOR_ID)
+        mon_name = data.get(FIRE_MONITOR_NAME)
+        mon_image_url = data.get(FIRE_MONITOR_IMAGE_URL)
+        mon_image_filename = data.get(FIRE_MONITOR_IMAGE_FILENAME)
+        mon_type = data.get(FIRE_SETTING_MON_TYPE)
+
+        MONITOR_DATA_LIST.append(
+            MONITOR_DATA(
+                mon_doc_id=mon_id,
+                mon_device_id=mon_device_id or "",
+                mon_name=mon_name or "",
+                image_url=mon_image_url or "",
+                image_filename=mon_image_filename or "",
+                mon_type=mon_type or "",
+            )
+        )
+    printDebug(f"\nMonitor Data: {MONITOR_DATA_LIST}\n")
+
+def start_monitors_listener(uid):
+    """Attach Firestore snapshot listener for monitors; Watch Monitor Name, imageURL, imageFilename."""
+    global MONITOR_DATA_LIST, monitors_doc_ref, monitors_listener_uid
+
+    printDebug(f"\nStarting Monitors listener ...")
+    
+    if uid is None:
+        print("\nCloud listener not started: No UID. (Connect Android to BASE).")
+        return False
+    uid = str(uid).strip()
+    if len(uid) < 28:
+        print("\nCloud listener not started: No UID. (Connect Android to BASE).")
+        return False
+
+    if monitors_doc_ref is not None and monitors_listener_uid == uid:
+        return False
+
+    try:
+        if monitors_doc_ref is not None:
+            monitors_doc_ref.unsubscribe()
+        monitors_doc_ref  = None
+        monitors_listener_uid = None
+
+        MONITOR_DATA_LIST = []
+        doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(uid).collection(FIRE_COLLECT_MONITORS)
+        monitors_doc_ref = doc_ref.on_snapshot(on_snapshot_monitors)
+        monitors_listener_uid = uid
+        printDebug(f"Monitors Cloud listener started on: {uid}")
+        return True
+
+    except Exception as e:
+        print(f"Monitors listener ERROR: {e}")
+        monitors_doc_ref = None
+        monitors_listener_uid = None
+        return False
+
+
+def get_monitor_data_by_device_id(iot_device_id: str) -> Optional[MONITOR_DATA]:
+    """Return the monitor whose mon_device_id matches the IoT device id, or None."""
+    if not iot_device_id:
+        return None
+    device_id = str(iot_device_id).strip()
+    if not device_id:
+        return None
+    for mon in MONITOR_DATA_LIST:
+        if mon.mon_device_id == device_id:
+            return mon
+    return None
 
 
 # Methods
@@ -350,6 +458,25 @@ def fire_read_ip_adr(bt_name=""):
         print(f"ERROR: fire_read_ip_adr(), reading from Firestore: {e}") 
 
     return "0.0.0.0"
+def _resolve_timestamp(epoch):
+    """Returns a timezone-aware UTC datetime; falls back to now() on garbage/missing/out-of-range."""
+    if epoch is None:
+        return datetime.now(timezone.utc)
+    try:
+        epoch_int = int(str(epoch).strip())
+    except (ValueError, TypeError):
+        print(f"Warning: invalid timestamp {epoch!r}, using current UTC time")
+        return datetime.now(timezone.utc)
+
+    # Auto-detect ms vs s: anything >= 1e12 is treated as milliseconds.
+    epoch_sec = epoch_int // 1000 if epoch_int >= 1_000_000_000_000 else epoch_int
+
+    # Valid range: ~2023-11-14 (1700000000) to ~2099-01-01 (4070908800)
+    if 1_700_000_000 <= epoch_sec <= 4_070_908_800:
+        return datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
+
+    print(f"Warning: timestamp {epoch_int} out of range, using current UTC time")
+    return datetime.now(timezone.utc)
 
 
 # Lock guards the on-disk offline queue against concurrent access.
@@ -371,8 +498,6 @@ def _iot_queue_load():
     except Exception as e:
         print(f"ERROR: _iot_queue_load: {e}")
     return []
-
-
 def _iot_queue_save(entries):
     """Atomic write so a power loss mid-save can't corrupt the queue."""
     tmp = iot_offline_file + ".tmp"
@@ -387,8 +512,6 @@ def _iot_queue_save(entries):
                 os.remove(tmp)
         except Exception:
             pass
-
-
 def _iot_queue_append(entry):
     with _iot_queue_lock:
         queue = _iot_queue_load()
@@ -400,15 +523,39 @@ def _iot_queue_append(entry):
         queue.append(entry)
         _iot_queue_save(queue)
         printDebug(f"Offline queue size: {len(queue)}")
-
-
+def _sanitize_iot_write_id(raw):
+    """Return a Firestore-safe document id fragment, or None if unusable."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s or len(s) > 128:
+        return None
+    for ch in s:
+        if ch.isalnum() or ch in ("_", "-"):
+            continue
+        return None
+    return s
+def _ensure_iot_write_id(doc):
+    """
+    Guarantee doc[FIRE_IOT_WRITE_ID] is set and return it.
+    Used as the iotData document id so ambiguous failures + retries upsert instead of duplicating.
+    """
+    existing = doc.get(FIRE_IOT_WRITE_ID)
+    cleaned = _sanitize_iot_write_id(existing)
+    if cleaned:
+        doc[FIRE_IOT_WRITE_ID] = cleaned
+        return cleaned
+    nid = uuid.uuid4().hex
+    doc[FIRE_IOT_WRITE_ID] = nid
+    return nid
 def _commit_wheel_write(userDocId, monDocId, doc, tStamp):
     """Build and commit the wheel batch with a short timeout. Returns True on success."""
+    iot_write_id = _ensure_iot_write_id(doc)
     batch = dbFire.batch()
 
     iot_doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId) \
         .collection(FIRE_COLLECT_MONITORS).document(monDocId) \
-        .collection(FIRE_COLLECT_IOT_DATA).document()
+        .collection(FIRE_COLLECT_IOT_DATA).document(iot_write_id)
     batch.set(iot_doc_ref, doc, merge=False)
 
     mon_doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId) \
@@ -417,8 +564,6 @@ def _commit_wheel_write(userDocId, monDocId, doc, tStamp):
 
     batch.commit(timeout=FIRESTORE_WRITE_TIMEOUT)
     return True
-
-
 def _commit_with_retry(userDocId, monDocId, doc, tStamp):
     """Try the write up to 1 + len(FIRESTORE_RETRY_BACKOFF) times. Returns True on success."""
     attempts = 1 + len(FIRESTORE_RETRY_BACKOFF)
@@ -434,8 +579,6 @@ def _commit_with_retry(userDocId, monDocId, doc, tStamp):
             print(f"Warning: firestore commit attempt {i + 1}/{attempts} failed ({type(e).__name__}: {e}), retrying in {delay}s")
             time.sleep(delay)
     return False
-
-
 def _iot_queue_flush():
     """One attempt per queued entry; stop on first failure to avoid a long block."""
     with _iot_queue_lock:
@@ -459,30 +602,7 @@ def _iot_queue_flush():
         if flushed:
             print(f"Flushed {flushed} queued IoT writes; {len(remaining)} remain")
         _iot_queue_save(remaining)
-
-
-def _resolve_timestamp(epoch):
-    """Returns a timezone-aware UTC datetime; falls back to now() on garbage/missing/out-of-range."""
-    if epoch is None:
-        return datetime.now(timezone.utc)
-    try:
-        epoch_int = int(str(epoch).strip())
-    except (ValueError, TypeError):
-        print(f"Warning: invalid timestamp {epoch!r}, using current UTC time")
-        return datetime.now(timezone.utc)
-
-    # Auto-detect ms vs s: anything >= 1e12 is treated as milliseconds.
-    epoch_sec = epoch_int // 1000 if epoch_int >= 1_000_000_000_000 else epoch_int
-
-    # Valid range: ~2023-11-14 (1700000000) to ~2099-01-01 (4070908800)
-    if 1_700_000_000 <= epoch_sec <= 4_070_908_800:
-        return datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
-
-    print(f"Warning: timestamp {epoch_int} out of range, using current UTC time")
-    return datetime.now(timezone.utc)
-
-
-def fire_write_iot_data(payload):
+def fire_write_iot_data(payload, iot_device_id=None):
     """Synchronous Firestore write. Designed to be called via asyncio.to_thread()."""
     try:
         tStamp = _resolve_timestamp(payload.get(FIRE_TIMESTAMP))
@@ -490,6 +610,23 @@ def fire_write_iot_data(payload):
         iotType = payload.get(JSON_IOT_TYPE)
         monDocId = payload.get(JSON_MONITOR_DOC_ID)
         userDocId = payload.get(JSON_USER_DOC_ID)
+        iot_device_id = payload.get(JSON_MONITOR_DEVICE_ID)
+        iot_name = ""
+        img_url = ""
+        img_file = ""
+        iot_type = ""
+        
+        mon_data = get_monitor_data_by_device_id(iot_device_id)
+        if mon_data:
+            monDocId = monDocId or mon_data.mon_doc_id
+            iot_name = mon_data.mon_name or payload.get(JSON_IOT_NAME, "")
+            iot_device_id = mon_data.mon_device_id
+            img_url = mon_data.image_url
+            img_file = mon_data.image_filename
+            iot_type = mon_data.mon_type
+        else:
+            print(f"fire_write_iot_data(): Monitor: ({iot_device_id}) not found")
+            return
 
         if not userDocId or not monDocId:
             print("ERROR: Missing userDocId or monDocId")
@@ -512,12 +649,25 @@ def fire_write_iot_data(payload):
             lines = 0
 
         doc = {
+            FIRE_SETTING_MON_TYPE: iot_type,
+            FIRE_SETTING_MON_NAME: iot_name,
+            FIRE_MONITOR_ID: iot_device_id,
+            FIRE_MONITOR_IMAGE_URL: img_url,
+            FIRE_MONITOR_IMAGE_FILENAME: img_file,
+            FIRE_SETTING_USER_DOC_ID: userDocId,
+            FIRE_SETTING_MON_ID: monDocId,
             FIRE_WHEEL_DISTANCE: distance,
             FIRE_WHEEL_LINES: lines,
             FIRE_WHEEL_OPERATOR: payload.get(JSON_WHEEL_OPERATOR, "none"),
             FIRE_WHEEL_SUPERVISOR: payload.get(JSON_WHEEL_SUPERVISOR, "none"),
             FIRE_TIMESTAMP: tStamp
         }
+
+        supplied = _sanitize_iot_write_id(payload.get(JSON_IOT_WRITE_ID))
+        if supplied:
+            doc[FIRE_IOT_WRITE_ID] = supplied
+        else:
+            doc[FIRE_IOT_WRITE_ID] = uuid.uuid4().hex
 
         if _commit_with_retry(userDocId, monDocId, doc, tStamp):
             printDebug(f"Firestore Write: {payload}")
@@ -543,7 +693,6 @@ def read_user_id_from_file():
         except Exception as e:
             print(f"read_user_id_from_file(): {e}")
             user_id = ""
-    
     return user_id
 def write_user_id_to_file(uid):
     global uid_data_file
@@ -859,17 +1008,18 @@ async def main():
     global mqtt_broker
     casePtr = 0
 
-    # Firestore operator-version listener: start if UID already on disk, else after MQTT #CONNECT_BAS
-    uid = read_user_id_from_file()
-    start_operators_version_listener(uid)
-
     while True:
         match casePtr:
 
             # Get Unit Name
             case 0:
                 BT_NAME = bt_get_name()
-                print(f"\nBluetooth Name: {BT_NAME}")
+                print(f"\nBluetoothXXX Name: {BT_NAME}")
+
+                # Firestore operator-version listener: start if UID already on disk, else after MQTT #CONNECT_BASE
+                user_id = read_user_id_from_file()
+                start_operators_version_listener(user_id)
+                start_monitors_listener(user_id)
                 casePtr+=1
             
             # Connect LAN / Wifi
@@ -934,7 +1084,10 @@ async def main():
                         # blip can't freeze the BLE/MQTT event loop for up to FIRESTORE_WRITE_TIMEOUT
                         # x (1 + len(FIRESTORE_RETRY_BACKOFF)) seconds.
                         if command == MqttService.MQTT_CMD_IOT_DATA:
-                            asyncio.create_task(asyncio.to_thread(fire_write_iot_data, payload))
+                            iot_device_id = message.get(MqttService.MQTT_SETTING_FROM_DEVICE_ID, "")
+                            asyncio.create_task(
+                                asyncio.to_thread(fire_write_iot_data, payload, iot_device_id)
+                            )
                         
                         # Connect Base
                         elif command == MqttService.MQTT_CMD_CONNECT_BASE:
@@ -945,6 +1098,7 @@ async def main():
                                 write_user_id_to_file(uid)
                             if len(str(uid or "").strip()) >= 28:
                                 start_operators_version_listener(uid)
+                                start_monitors_listener(uid)
                      
                         # Sync IOT
                         elif command == MqttService.MQTT_CMD_SYNC:

@@ -37,7 +37,7 @@ MQTT_SETTING_USER_ID = "userId"
 MQTT_SETTING_DOC_ID = "docId"
 
 #MQTT Commands
-MQTT_CMD_DISCOVERY = "#REQ_MONITOR"
+MQTT_CMD_DISCOVERY = "#DISCOVER"
 MQTT_CMD_FOUND_MONITOR = "#FOUND_MONITOR"
 MQTT_CMD_CONNECT_MONITOR = "#CONNECT_MONITOR"
 MQTT_CMD_CONNECT_BASE = "#CONNECT_BASE"
@@ -135,7 +135,6 @@ class MqttServer:
             print(msg)
     def sendOperators(self, operators_list, operators_version):
         global SYNC_REQUESTED_FROM_DEVICE_ID
-        #global SYNC_REQUESTED_FROM_IOT_TYPE
     
         if SYNC_REQUESTED_FROM_DEVICE_ID == "":
             print(f"No sync requested. Ignoring sync.")
@@ -145,7 +144,6 @@ class MqttServer:
         
         payload = {
             MQTT_SETTING_OPERATORS_LIST: operators_list  ,
-            #SETTING_JSON_IOT_TYPE: SYNC_REQUESTED_FROM_IOT_TYPE,
             MQTT_SETTING_OPERATORS_VERSION: operators_version
         }
 
@@ -447,7 +445,7 @@ class MqttServer:
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printMqttComms(f"MQTT TX: {txPayload}")
 
-                # Tag Data 
+                # Tag Data (IOT to Android) (Send TAG to enroll Operator)
                 if(command == MQTT_CMD_TAG_DATA):    
                     if(TAG_REQUESTED_FROM_DEVICE_ID != ""):
 
