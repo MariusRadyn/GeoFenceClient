@@ -83,6 +83,7 @@ JSON_WHEEL_OPERATOR = "operator"
 JSON_WHEEL_SUPERVISOR = "supervisor"
 JSON_WHEEL_DISTANCE = "distance"
 JSON_WHEEL_LINES = "lines"  
+JSON_WHEEL_TICKS = "ticks"  
 JSON_SET_TIMESTAMP = "timestamp"  
 JSON_USER_DOC_ID = "userDocId"  
 JSON_MONITOR_DOC_ID = "monDocId"
@@ -119,6 +120,7 @@ FIRE_WHEEL_OPERATOR = "operator"
 FIRE_WHEEL_SUPERVISOR = "supervisor"
 FIRE_WHEEL_DISTANCE = "distance"
 FIRE_WHEEL_LINES = "lines"
+FIRE_WHEEL_TICKS = "ticks"
 FIRE_WHEEL_LAST_LOG_TIMESTAMP = "lastLogTimestamp"
 
 # (Firsetore) Operators
@@ -224,7 +226,6 @@ def start_operators_version_listener(uid):
         operators_version_doc_ref = None
         operators_version_listener_uid = None
         return False
-
 def on_snapshot_monitors(doc_snapshot, changes, read_time):
     global MONITOR_DATA_LIST
 
@@ -255,7 +256,6 @@ def on_snapshot_monitors(doc_snapshot, changes, read_time):
             )
         )
     printDebug(f"\nMonitor Data: {MONITOR_DATA_LIST}\n")
-
 def start_monitors_listener(uid):
     """Attach Firestore snapshot listener for monitors; Watch Monitor Name, imageURL, imageFilename."""
     global MONITOR_DATA_LIST, monitors_doc_ref, monitors_listener_uid
@@ -291,8 +291,6 @@ def start_monitors_listener(uid):
         monitors_doc_ref = None
         monitors_listener_uid = None
         return False
-
-
 def get_monitor_data_by_device_id(iot_device_id: str) -> Optional[MONITOR_DATA]:
     """Return the monitor whose mon_device_id matches the IoT device id, or None."""
     if not iot_device_id:
@@ -648,6 +646,12 @@ def fire_write_iot_data(payload, iot_device_id=None):
             print(f"Warning: invalid lines {payload.get(JSON_WHEEL_LINES)!r}, defaulting to 0")
             lines = 0
 
+        try:
+            ticks = int(float(str(payload.get(JSON_WHEEL_TICKS, 0)).strip()))
+        except (ValueError, TypeError):
+            print(f"Warning: invalid lines {payload.get(JSON_WHEEL_TICKS)!r}, defaulting to 0")
+            ticks = 0
+
         doc = {
             FIRE_SETTING_MON_TYPE: iot_type,
             FIRE_SETTING_MON_NAME: iot_name,
@@ -658,6 +662,7 @@ def fire_write_iot_data(payload, iot_device_id=None):
             FIRE_SETTING_MON_ID: monDocId,
             FIRE_WHEEL_DISTANCE: distance,
             FIRE_WHEEL_LINES: lines,
+            FIRE_WHEEL_TICKS: ticks,
             FIRE_WHEEL_OPERATOR: payload.get(JSON_WHEEL_OPERATOR, "none"),
             FIRE_WHEEL_SUPERVISOR: payload.get(JSON_WHEEL_SUPERVISOR, "none"),
             FIRE_TIMESTAMP: tStamp

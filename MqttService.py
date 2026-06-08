@@ -39,6 +39,7 @@ MQTT_SETTING_DOC_ID = "docId"
 #MQTT Commands
 MQTT_CMD_DISCOVERY = "#DISCOVER"
 MQTT_CMD_FOUND_MONITOR = "#FOUND_MONITOR"
+MQTT_CMD_CALIBRATE = "#CALIBRATE"
 MQTT_CMD_CONNECT_MONITOR = "#CONNECT_MONITOR"
 MQTT_CMD_CONNECT_BASE = "#CONNECT_BASE"
 MQTT_CMD_DISCONNECT_MONITOR = "#DISCONNECT_MONITOR"
@@ -232,6 +233,28 @@ class MqttServer:
                     self.printMqttComms(f"MQTT TX: {self.settings} {response_topic}")
                     # Add BaseStation LIST here
 
+                # Calibrate Monitor
+                if(command == MQTT_CMD_CALIBRATE):
+                    
+                    iot_type = payload[MQTT_SETTING_IOT_TYPE]
+                    
+                    settings = {
+                        MQTT_SETTING_IOT_TYPE: iot_type,
+                    }
+
+                    response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
+                    
+                    txPayload = {
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TO_DEVICE_ID: to_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: settings,
+                        MQTT_SETTING_CMD:MQTT_CMD_CALIBRATE
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+
                 # Connect to Monitor
                 if(command == MQTT_CMD_CONNECT_MONITOR):
                     
@@ -241,8 +264,6 @@ class MqttServer:
                     settings = {
                         MQTT_SETTING_IOT_TYPE: iot_type,
                         MQTT_SETTING_TICKS_PER_M: ticks,
-                        #SETTING_JSON_DOC_ID: docId,
-                        #SETTING_JSON_USER_ID: userId,
                     }
 
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
@@ -417,6 +438,20 @@ class MqttServer:
                         self.queue.get_nowait()   # discard oldest
                         self.queue.put_nowait(jsondata)
     
+                # Calibrate  (IOT to Android)
+                if(command == MQTT_CMD_CALIBRATE):                 
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
+                     
+                    txPayload = {
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: "",
+                        MQTT_SETTING_CMD:MQTT_CMD_CALIBRATEwin
+                    }
+        
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printMqttComms(f"MQTT TX: {txPayload}")
+
                 # Connect  (IOT to Android)
                 if(command == MQTT_CMD_CONNECT_MONITOR):                 
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
