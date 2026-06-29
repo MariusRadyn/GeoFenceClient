@@ -13,6 +13,7 @@ import asyncio
 from bleak import BleakScanner, BleakClient
 import re
 import MqttService
+import Settings as set
 import WifiCredentials
 from WifiCredentials import parser as wifi_parser
 import os
@@ -90,8 +91,6 @@ JSON_MONITOR_DOC_ID = "monDocId"
 JSON_MONITOR_DEVICE_ID = "monitorId"
 JSON_IOT_TYPE = "iotType" 
 JSON_IOT_NAME = "iotName"
-# Optional: stable id for this reading so Firestore upserts the same doc on retry (1–128 chars: [A-Za-z0-9_-]).
-JSON_IOT_WRITE_ID = "iotWriteId"
 
 # Firestore
 TARGET_PREFIX = "iOT"
@@ -163,18 +162,17 @@ iot_offline_file = os.path.expanduser("~/Secure/iot_offline_queue.bin")
 
 monitors_listener_uid = None
 monitors_doc_ref = None
+new_operator_data_available = False
 
 # Firestore write tuning (kept short so a network blip doesn't freeze the device for 60s)
 FIRESTORE_WRITE_TIMEOUT = 15  # seconds, per attempt
 FIRESTORE_RETRY_BACKOFF = (1, 3, 9)  # delays between attempts; len = retries after first try
 FIRESTORE_OFFLINE_QUEUE_MAX = 5000  # cap so disk doesn't grow forever
-  
-# Debug
-PRINT_DEBUG_ENABLED = True
 
 # Firestore Listeners
 def on_snapshot_operator(doc_snapshot, changes, read_time):
     global operators_version
+    global new_operator_data_available
 
     for doc in doc_snapshot:
         data = doc.to_dict()
@@ -183,27 +181,28 @@ def on_snapshot_operator(doc_snapshot, changes, read_time):
         # First load: just store value
         if operators_version is None:
             operators_version = current_version
-            print("Initial version:", current_version)
+            printDebug(f"Initial Operators Version: {current_version}",set.PRINT_DEBUG_OPERATOR)
             return
 
         # Only trigger if version increased
         if current_version is not None and current_version > operators_version:
-            print(f"Version updated: {operators_version} → {current_version}")
+            printDebug(f"Operators Version updated: {operators_version} → {current_version}",set.PRINT_DEBUG_OPERATOR)
 
             # update stored version
             operators_version = current_version
+            new_operator_data_available = True
 def start_operators_version_listener(uid):
     """Attach Firestore snapshot listener for operatorsVer; safe to call repeatedly (same uid no-op)."""
     global operators_version_doc_ref, operators_version_listener_uid, operators_version
     
-    printDebug(f"\nStarting operators listener ...")
+    printDebug(f"\nStarting operators listener ...",set.PRINT_DEBUG_GENERAL)
     
     if uid is None:
-        print("\nCloud listener not started: No UID. (Connect Android to BASE).")
+        printDebug("\nCloud listener not started: No UID. (Connect Android to BASE).",set.PRINT_DEBUG_ERROR)
         return False
     uid = str(uid).strip()
     if len(uid) < 28:
-        print("\nCloud listener not started: No UID. (Connect Android to BASE).")
+        printDebug("\nCloud listener not started: No UID. (Connect Android to BASE).",set.PRINT_DEBUG_ERROR)
         return False
 
     if operators_version_doc_ref is not None and operators_version_listener_uid == uid:
@@ -219,10 +218,10 @@ def start_operators_version_listener(uid):
         doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(uid)
         operators_version_doc_ref = doc_ref.on_snapshot(on_snapshot_operator)
         operators_version_listener_uid = uid
-        printDebug(f"Operator Cloud listener started on: {uid}")
+        printDebug(f"Operator Cloud listener started on: {uid}",set.PRINT_DEBUG_GENERAL)
         return True
     except Exception as e:
-        print(f"Operator listener ERROR: {e}")
+        printDebug(f"Operator listener ERROR: {e}",set.PRINT_DEBUG_ERROR)
         operators_version_doc_ref = None
         operators_version_listener_uid = None
         return False
@@ -255,19 +254,19 @@ def on_snapshot_monitors(doc_snapshot, changes, read_time):
                 mon_type=mon_type or "",
             )
         )
-    printDebug(f"\nMonitor Data: {MONITOR_DATA_LIST}\n")
+    printDebug(f"\nMonitor Data: {MONITOR_DATA_LIST}\n", set.PRINT_DEBUG_MONITOR)
 def start_monitors_listener(uid):
     """Attach Firestore snapshot listener for monitors; Watch Monitor Name, imageURL, imageFilename."""
     global MONITOR_DATA_LIST, monitors_doc_ref, monitors_listener_uid
 
-    printDebug(f"\nStarting Monitors listener ...")
+    printDebug(f"\nStarting Monitors listener ...", set.PRINT_DEBUG_GENERAL)
     
     if uid is None:
-        print("\nCloud listener not started: No UID. (Connect Android to BASE).")
+        printDebug("\nCloud listener not started: No UID. (Connect Android to BASE).",set.PRINT_DEBUG_ERROR)
         return False
     uid = str(uid).strip()
     if len(uid) < 28:
-        print("\nCloud listener not started: No UID. (Connect Android to BASE).")
+        printDebug("\nCloud listener not started: No UID. (Connect Android to BASE).",set.PRINT_DEBUG_ERROR)
         return False
 
     if monitors_doc_ref is not None and monitors_listener_uid == uid:
@@ -283,11 +282,11 @@ def start_monitors_listener(uid):
         doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(uid).collection(FIRE_COLLECT_MONITORS)
         monitors_doc_ref = doc_ref.on_snapshot(on_snapshot_monitors)
         monitors_listener_uid = uid
-        printDebug(f"Monitors Cloud listener started on: {uid}")
+        printDebug(f"Monitors Cloud listener started on: {uid}", set.PRINT_DEBUG_GENERAL)
         return True
 
     except Exception as e:
-        print(f"Monitors listener ERROR: {e}")
+        printDebug(f"Monitors listener ERROR: {e}",set.PRINT_DEBUG_ERROR)
         monitors_doc_ref = None
         monitors_listener_uid = None
         return False
@@ -315,16 +314,16 @@ def checkWifiConnection():
         
         ssid = result.decode().strip()  
         if ssid:
-            printDebug(f"WIFI Connected: {ssid}")
+            printDebug(f"WIFI Connected: {ssid}", set.PRINT_DEBUG_WIFI)
         else:
-            printDebug("No WIFI Connection")
+            printDebug("No WIFI Connection", set.PRINT_DEBUG_WIFI)
         
         return ssid
     except subprocess.CalledProcessError as e:
-        print(f"Error: checkWifiConnection {e}")
+        printDebug(f"Error: checkWifiConnection {e}",set.PRINT_DEBUG_ERROR)
         return None
-def printDebug(msg):
-    if PRINT_DEBUG_ENABLED:
+def printDebug(msg, enabled):
+    if enabled:
         print(msg)
 def fire_sync_ip_address(ipLocal):
     global settings 
@@ -335,12 +334,12 @@ def fire_sync_ip_address(ipLocal):
     # Android will get IP from firestore
     
     read_settings()
-    printDebug(f"IP Address (settings): {settings['ipadr']}")
-    printDebug(f"IP Address (Unit): {ipLocal}")
+    printDebug(f"IP Address (settings): {settings['ipadr']}", set.PRINT_DEBUG_IP_INFO)
+    printDebug(f"IP Address (Unit): {ipLocal}", set.PRINT_DEBUG_IP_INFO)
     
     # Update Settings file
     if(ipLocal != settings["ipadr"]):
-        printDebug(f"Local IP Address Changed: {ipLocal} -> {settings['ipadr']}"   )
+        printDebug(f"Local IP Address Changed: {ipLocal} -> {settings['ipadr']}", set.PRINT_DEBUG_IP_INFO)
         settings["ipadr"] = ipLocal
         write_local_settings()
    
@@ -348,7 +347,7 @@ def fire_sync_ip_address(ipLocal):
     ipFire = fire_read_ip_adr(BT_NAME)
 
     if(ipFire != ipLocal):
-        printDebug(f"Update IP Address Firestore: {ipFire} -> {ipLocal}"   )
+        printDebug(f"Update IP Address Firestore: {ipFire} -> {ipLocal}", set.PRINT_DEBUG_IP_INFO)
         fire_write_ip_adr(BT_NAME,IP_ADDRESS)
         return True
     return False  
@@ -368,12 +367,12 @@ def get_local_ip_address(interface = INTERFACE_ETH):
             match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", result.stdout)
             if match:
                 ip = match.group(1)
-                print("LAN Connected")
+                printDebug("LAN Connected",set.PRINT_DEBUG_GENERAL)
             else:
-                print("LAN Connection")
+                printDebug("LAN Connection",set.PRINT_DEBUG_GENERAL)
 
     except subprocess.CalledProcessError:
-        print(f"Error: get_local_ip_address(), Could not get IP address for interface {interface}")
+        printDebug(f"Error: get_local_ip_address(), Could not get IP address for interface {interface}",set.PRINT_DEBUG_ERROR)
     
     # Switch to WiFi if no IP found on Ethernet
     if(interface == INTERFACE_WIFI or ip == "0.0.0.0"):
@@ -390,12 +389,12 @@ def get_local_ip_address(interface = INTERFACE_ETH):
             match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", result.stdout)
             if match:
                 ip = match.group(1)
-                print("Wifi Connected")
+                printDebug("Wifi Connected",set.PRINT_DEBUG_WIFI)
             else:
-                print("No Wifi Connection")
+                printDebug("No Wifi Connection",set.PRINT_DEBUG_WIFI)
         
         except subprocess.CalledProcessError:
-            print(f"ERROR: get_local_ip_address(), Could not get IP address for interface wlan0")
+            printDebug(f"ERROR: get_local_ip_address(), Could not get IP address for interface wlan0",set.PRINT_DEBUG_ERROR)
             
     return ip
 def read_settings():
@@ -404,10 +403,10 @@ def read_settings():
     if os.path.exists(settingsFilePath):
         with open(settingsFilePath, "r") as f:
             settings = json.load(f)
-            printDebug(f"Settings Found: {settings  }")
+            printDebug(f"Settings Found: {settings  }", set.PRINT_DEBUG_GENERAL)
     else:
         # Create Default Settings file
-        printDebug(f"Setings file not found, create default SETTINGS file.")
+        printDebug(f"Setings file not found, create default SETTINGS file.", set.PRINT_DEBUG_ERROR)
         settings = {
             "ipadr": "0.0.0.0"
         }
@@ -415,15 +414,15 @@ def read_settings():
 def write_local_settings():   
     with open(settingsFilePath, "w") as f:
         json.dump(settings, f, indent=4)   
-        printDebug(f"Write Local Settings: {settings} to {settingsFilePath}")
+        printDebug(f"Write Local Settings: {settings} to {settingsFilePath}", set.PRINT_DEBUG_GENERAL)
 def fire_write_ip_adr(bt_name="",ip_address=""):
     
     if bt_name == "":
-        print("ERROR: fire_write_ip_adr(), Unknown Bluetooth Name, cannot write to Firestore.")
+        printDebug("ERROR: fire_write_ip_adr(), Unknown Bluetooth Name, cannot write to Firestore.",set.PRINT_DEBUG_ERROR)
         return
     
     if ip_address == "0.0.0.0":
-        print("ERROR: fire_write_ip_adr(),\nNo IP Address found. Check Nerwork Connection.\nCannot write to Firestore.")
+        printDebug("ERROR: fire_write_ip_adr(),\nNo IP Address found. Check Nerwork Connection.\nCannot write to Firestore.",set.PRINT_DEBUG_ERROR)
         return
     
     try:
@@ -433,12 +432,12 @@ def fire_write_ip_adr(bt_name="",ip_address=""):
             FIRE_SET_IP_LAST_CON: datetime.now().strftime("%d:%m:%Y %H:%M:%S")
         }, merge=True)
         
-        print(f"Firestore Write: {bt_name}@{ip_address}")
+        printDebug(f"Firestore Write: {bt_name}@{ip_address}",set.PRINT_DEBUG_FIRESTORE)
     except Exception as e:
-        print(f"ERROR: fire_write_ip_adr(), writing to Firestore: {e}")
+        printDebug(f"ERROR: fire_write_ip_adr(), writing to Firestore: {e}",set.PRINT_DEBUG_ERROR)
 def fire_read_ip_adr(bt_name=""):
     if bt_name == "":
-        print("ERROR: fire_read_ip_adr(), Unknown Bluetooth Name, cannot read from Firestore.")
+        printDebug("ERROR: fire_read_ip_adr(), Unknown Bluetooth Name, cannot read from Firestore.",set.PRINT_DEBUG_ERROR)
         return "0.0.0.0"
      
     try:
@@ -447,13 +446,13 @@ def fire_read_ip_adr(bt_name=""):
 
         if doc.exists:
             firestore_ip = doc.to_dict().get(FIRE_SET_IP_ADR, "0.0.0.0")
-            printDebug(f"Firestore IP: {firestore_ip}")
+            printDebug(f"Firestore IP: {firestore_ip}", set.PRINT_DEBUG_IP_INFO)
             return firestore_ip
         else:
-            print(f"Firestore Failed to read document: {bt_name}")
+            printDebug(f"Firestore Failed to read document: {bt_name}",set.PRINT_DEBUG_ERROR)
     
     except Exception as e:
-        print(f"ERROR: fire_read_ip_adr(), reading from Firestore: {e}") 
+        printDebug(f"ERROR: fire_read_ip_adr(), reading from Firestore: {e}",set.PRINT_DEBUG_ERROR) 
 
     return "0.0.0.0"
 def _resolve_timestamp(epoch):
@@ -463,7 +462,7 @@ def _resolve_timestamp(epoch):
     try:
         epoch_int = int(str(epoch).strip())
     except (ValueError, TypeError):
-        print(f"Warning: invalid timestamp {epoch!r}, using current UTC time")
+        printDebug(f"Warning: invalid timestamp {epoch!r}, using current UTC time",set.PRINT_DEBUG_ERROR)
         return datetime.now(timezone.utc)
 
     # Auto-detect ms vs s: anything >= 1e12 is treated as milliseconds.
@@ -473,7 +472,7 @@ def _resolve_timestamp(epoch):
     if 1_700_000_000 <= epoch_sec <= 4_070_908_800:
         return datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
 
-    print(f"Warning: timestamp {epoch_int} out of range, using current UTC time")
+    printDebug(f"Warning: timestamp {epoch_int} out of range, using current UTC time",set.PRINT_DEBUG_ERROR)
     return datetime.now(timezone.utc)
 
 
@@ -481,7 +480,6 @@ def _resolve_timestamp(epoch):
 # Today only the main loop writes to it, but firestore listeners run on
 # their own thread, so cheap insurance.
 _iot_queue_lock = threading.Lock()
-
 
 def _iot_queue_load():
     """Return list of pending writes; empty list if file is missing or unreadable."""
@@ -492,9 +490,9 @@ def _iot_queue_load():
             data = pickle.load(f)
         if isinstance(data, list):
             return data
-        print(f"Warning: offline queue file has unexpected type {type(data).__name__}, discarding")
+        printDebug(f"Warning: offline queue file has unexpected type {type(data).__name__}, discarding",set.PRINT_DEBUG_ERROR)
     except Exception as e:
-        print(f"ERROR: _iot_queue_load: {e}")
+        printDebug(f"ERROR: _iot_queue_load: {e}",set.PRINT_DEBUG_ERROR)
     return []
 def _iot_queue_save(entries):
     """Atomic write so a power loss mid-save can't corrupt the queue."""
@@ -504,7 +502,7 @@ def _iot_queue_save(entries):
             pickle.dump(entries, f)
         os.replace(tmp, iot_offline_file)
     except Exception as e:
-        print(f"ERROR: _iot_queue_save: {e}")
+        printDebug(f"ERROR: _iot_queue_save: {e}",set.PRINT_DEBUG_ERROR)
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -516,11 +514,11 @@ def _iot_queue_append(entry):
         # Cap queue size so a long outage can't fill the disk.
         if len(queue) >= FIRESTORE_OFFLINE_QUEUE_MAX:
             dropped = len(queue) - FIRESTORE_OFFLINE_QUEUE_MAX + 1
-            print(f"Warning: offline queue at cap, dropping {dropped} oldest entries")
+            printDebug(f"Warning: Offline queue Overflow, dropping {dropped} oldest entries", set.PRINT_DEBUG_GENERAL)
             queue = queue[dropped:]
         queue.append(entry)
         _iot_queue_save(queue)
-        printDebug(f"Offline queue size: {len(queue)}")
+        printDebug(f"Offline queue size: {len(queue)}", set.PRINT_DEBUG_GENERAL)
 def _sanitize_iot_write_id(raw):
     """Return a Firestore-safe document id fragment, or None if unusable."""
     if raw is None:
@@ -571,10 +569,10 @@ def _commit_with_retry(userDocId, monDocId, doc, tStamp):
         except Exception as e:
             is_last = (i == attempts - 1)
             if is_last:
-                print(f"ERROR: firestore commit failed after {attempts} attempts: {type(e).__name__}: {e}")
+                printDebug(f"ERROR: firestore commit failed after {attempts} attempts: {type(e).__name__}: {e}",set.PRINT_DEBUG_ERROR)
                 return False
             delay = FIRESTORE_RETRY_BACKOFF[i]
-            print(f"Warning: firestore commit attempt {i + 1}/{attempts} failed ({type(e).__name__}: {e}), retrying in {delay}s")
+            printDebug(f"Warning: firestore commit attempt {i + 1}/{attempts} failed ({type(e).__name__}: {e}), retrying in {delay}s",set.PRINT_DEBUG_ERROR)
             time.sleep(delay)
     return False
 def _iot_queue_flush():
@@ -584,7 +582,7 @@ def _iot_queue_flush():
         if not queue:
             return
 
-        printDebug(f"Flushing {len(queue)} queued IoT writes")
+        printDebug(f"Flushing {len(queue)} queued IoT writes", set.PRINT_DEBUG_GENERAL)
         remaining = list(queue)
         flushed = 0
         while remaining:
@@ -594,11 +592,11 @@ def _iot_queue_flush():
                 remaining.pop(0)
                 flushed += 1
             except Exception as e:
-                print(f"Warning: queue flush stopped at entry {flushed} ({type(e).__name__}: {e}); {len(remaining)} remain")
+                printDebug(f"Warning: queue flush stopped at entry {flushed} ({type(e).__name__}: {e}); {len(remaining)} remain",set.PRINT_DEBUG_ERROR)
                 break
 
         if flushed:
-            print(f"Flushed {flushed} queued IoT writes; {len(remaining)} remain")
+            printDebug(f"Flushed {flushed} queued IoT writes; {len(remaining)} remain", set.PRINT_DEBUG_FIRESTORE)
         _iot_queue_save(remaining)
 def fire_write_iot_data(payload, iot_device_id=None):
     """Synchronous Firestore write. Designed to be called via asyncio.to_thread()."""
@@ -623,33 +621,33 @@ def fire_write_iot_data(payload, iot_device_id=None):
             img_file = mon_data.image_filename
             iot_type = mon_data.mon_type
         else:
-            print(f"fire_write_iot_data(): Monitor: ({iot_device_id}) not found")
+            printDebug(f"fire_write_iot_data(): Monitor: ({iot_device_id}) not found", set.PRINT_DEBUG_ERROR)
             return
 
         if not userDocId or not monDocId:
-            print("ERROR: Missing userDocId or monDocId")
+            printDebug("ERROR: Missing userDocId or monDocId",set.PRINT_DEBUG_ERROR)
             return
 
         if iotType != IOT_TYPE_WHEEL:
-            printDebug(f"Unknown Test Type: {iotType}")
+            printDebug(f"fire_write_iot_data, Unknown Test Type: {iotType}",set.PRINT_DEBUG_ERROR)
             return
 
         try:
             distance = float(str(payload.get(JSON_WHEEL_DISTANCE, 0)).strip())
         except (ValueError, TypeError):
-            print(f"Warning: invalid distance {payload.get(JSON_WHEEL_DISTANCE)!r}, defaulting to 0.0")
+            printDebug(f"Warning: invalid distance {payload.get(JSON_WHEEL_DISTANCE)!r}, defaulting to 0.0", set.PRINT_DEBUG_ERROR)
             distance = 0.0
 
         try:
             lines = int(float(str(payload.get(JSON_WHEEL_LINES, 0)).strip()))
         except (ValueError, TypeError):
-            print(f"Warning: invalid lines {payload.get(JSON_WHEEL_LINES)!r}, defaulting to 0")
+            printDebug(f"Warning: invalid lines {payload.get(JSON_WHEEL_LINES)!r}, defaulting to 0", set.PRINT_DEBUG_ERROR)
             lines = 0
 
         try:
             ticks = int(float(str(payload.get(JSON_WHEEL_TICKS, 0)).strip()))
         except (ValueError, TypeError):
-            print(f"Warning: invalid lines {payload.get(JSON_WHEEL_TICKS)!r}, defaulting to 0")
+            printDebug(f"Warning: invalid lines {payload.get(JSON_WHEEL_TICKS)!r}, defaulting to 0", set.PRINT_DEBUG_ERROR)
             ticks = 0
 
         doc = {
@@ -668,23 +666,23 @@ def fire_write_iot_data(payload, iot_device_id=None):
             FIRE_TIMESTAMP: tStamp
         }
 
-        supplied = _sanitize_iot_write_id(payload.get(JSON_IOT_WRITE_ID))
+        supplied = _sanitize_iot_write_id(payload.get(FIRE_IOT_WRITE_ID))
         if supplied:
             doc[FIRE_IOT_WRITE_ID] = supplied
         else:
             doc[FIRE_IOT_WRITE_ID] = uuid.uuid4().hex
 
         if _commit_with_retry(userDocId, monDocId, doc, tStamp):
-            printDebug(f"Firestore Write: {payload}")
+            printDebug(f"Firestore Write: {payload}",set.PRINT_DEBUG_FIRESTORE)
             # Opportunistically flush anything that piled up during prior outages.
             _iot_queue_flush()
         else:
             # Capture-time tStamp is preserved so flushed writes keep their original time.
             _iot_queue_append((userDocId, monDocId, doc, tStamp))
-            print("Queued IoT write for later retry")
+            printDebug("Queued IoT write for later retry", set.PRINT_DEBUG_ERROR)
 
     except Exception as e:
-        print(f"ERROR: fire_write_iot_data: {type(e).__name__}: {e}")
+        printDebug(f"ERROR: fire_write_iot_data: {type(e).__name__}: {e}", set.PRINT_DEBUG_ERROR)
 def read_user_id_from_file():
     global uid_data_file
 
@@ -693,10 +691,10 @@ def read_user_id_from_file():
         try:
             with open(uid_data_file, 'rb') as f:
                 user_id = pickle.load(f)
-                printDebug(f"Read User ID from file: {user_id}")
+                printDebug(f"Read User ID from file: {user_id}",set.PRINT_DEBUG_GENERAL)
     
         except Exception as e:
-            print(f"read_user_id_from_file(): {e}")
+            printDebug(f"read_user_id_from_file(): {e}", set.PRINT_DEBUG_ERROR)
             user_id = ""
     return user_id
 def write_user_id_to_file(uid):
@@ -705,9 +703,9 @@ def write_user_id_to_file(uid):
     try:
         with open(uid_data_file, 'wb') as f:
             pickle.dump(uid, f)
-            printDebug(f"Saved User ID to file: {uid}")
+            printDebug(f"Saved User ID to file: {uid}",set.PRINT_DEBUG_GENERAL)
     except Exception as e:
-        print(f"ERROR: write_uid_to_file(), {e}")
+        printDebug(f"ERROR: write_uid_to_file(), {e}",set.PRINT_DEBUG_ERROR)
 
 #  Operators 
 def read_local_operators_ver_from_file():
@@ -720,7 +718,7 @@ def read_local_operators_ver_from_file():
                 opVer = pickle.load(f)
     
         except Exception as e:
-            print(f"fire_read_operators_version(): {e}")
+            printDebug(f"fire_read_operators_version(): {e}",set.PRINT_DEBUG_ERROR)
     
     return opVer
 def read_local_operators_from_file():
@@ -732,7 +730,7 @@ def read_local_operators_from_file():
                 operators = pickle.load(f)
     
         except Exception as e:
-            print(f"read_local_operators_list(): {e}")
+            printDebug(f"read_local_operators_list(): {e}",set.PRINT_DEBUG_ERROR)
             operators = []
     
     return operators    
@@ -741,7 +739,7 @@ def fire_read_operators_version():
         uid = read_user_id_from_file()
 
         if(len(uid) < 28):  # Firestore User Doc IDs are 28 chars long
-            print("Cant sync operator list. No User ID found. Connect Android app to Base Station")
+            printDebug("Cant sync operator list. No User ID found. Connect Android app to Base Station",set.PRINT_DEBUG_ERROR)
             return "0"
             
         version_doc = dbFire.collection(FIRE_COLLECT_USERS).document(uid)
@@ -757,12 +755,12 @@ def fire_read_operators_version():
         return version
     
     except Exception as e:
-        print(f"fire_read_operators_version(): {e}")
+        printDebug(f"fire_read_operators_version(): {e}",set.PRINT_DEBUG_ERROR)
         return "0"
 def fire_read_operators(userId=""): 
     try:
         if not userId:
-            print("ERROR: fire_read_operators(), Missing userDocId")
+            printDebug("ERROR: fire_read_operators(), Missing userDocId",set.PRINT_DEBUG_ERROR)
             return []
             
         operators_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userId)\
@@ -774,11 +772,11 @@ def fire_read_operators(userId=""):
         for doc in docs:
             operators.append(doc.to_dict())
             
-        printDebug(f"Firestore Read Operators: {len(operators)} operators found")
+        printDebug(f"Firestore Read Operators: {len(operators)} operators found",set.PRINT_DEBUG_OPERATOR)
         return operators
         
     except Exception as e:
-        print(f"ERROR: fire_read_operators(): {e}")
+        printDebug(f"ERROR: fire_read_operators(): {e}",set.PRINT_DEBUG_ERROR)
         return []
 def fire_sync_operator_list(iot_operators_version = "0"):
     global operators_version_file
@@ -786,16 +784,18 @@ def fire_sync_operator_list(iot_operators_version = "0"):
 
     try:
         uid = read_user_id_from_file()
-
         if(len(uid) < 28):  # Firestore User Doc IDs are 28 chars long
-            print("Cant sync operator list. No User ID found. Connect Android app to Base Station")
+            printDebug("Cant sync operator list. No User ID found. Connect Android app to Base Station",set.PRINT_DEBUG_ERROR)
             return "0"
         
-        print(f"Syncing operators for UID: {uid}...")
+        printDebug(f"Syncing operators for UID: {uid}...",set.PRINT_DEBUG_OPERATOR)
         
         fire_operator_ver = fire_read_operators_version()
+        printDebug(f"fire_operator_ver: {fire_operator_ver}...",set.PRINT_DEBUG_OPERATOR)
+        printDebug(f"iot_operator_ver: {iot_operators_version}...",set.PRINT_DEBUG_OPERATOR)
+        
         if(fire_operator_ver == iot_operators_version):
-            print("Up to Date.")
+            printDebug("Up to Date.",set.PRINT_DEBUG_OPERATOR)
             return False
         
         # Get Operators
@@ -815,25 +815,25 @@ def fire_sync_operator_list(iot_operators_version = "0"):
             with open(operators_data_file, 'wb') as f:
                 pickle.dump(operator_data, f)
             
-            print(f"Saved {len(operator_data)} operators to {operators_data_file}")
+            printDebug(f"Saved {len(operator_data)} operators to {operators_data_file}",set.PRINT_DEBUG_OPERATOR)
         
         # Create new operators version
-        new_version = str(int(datetime.now(timezone.utc).timestamp()))  
+        #new_version = str(int(datetime.now(timezone.utc).timestamp()))  
         
         # Save Local operators version
         with open(operators_version_file, 'wb') as f:
-            pickle.dump(new_version, f)
+            pickle.dump(fire_operator_ver, f)
         
         # Save Firestore operators version
-        dbFire.collection(FIRE_COLLECT_USERS)\
-            .document(uid)\
-            .set({FIRE_OPERATOR_VERSION: new_version}, merge=True )
+        # dbFire.collection(FIRE_COLLECT_USERS)\
+        #     .document(uid)\
+        #     .set({FIRE_OPERATOR_VERSION: new_version}, merge=True )
 
-        print(f"Updated version to: {new_version}")
+        # printDebug(f"Updated Operator Version to: {new_version}",set.PRINT_DEBUG_OPERATOR)
         return True
     
     except Exception as e:
-        print(f"ERROR: sync_operator_list: {e}")
+        printDebug(f"ERROR: sync_operator_list: {e}",set.PRINT_DEBUG_ERROR)
         return False
     
 # Bluetooth Methods
@@ -841,7 +841,7 @@ async def bt_discover():
     global lstBtConnectedDevices
     showMsg = True
     
-    print("\nStarting Bluetooth Discovery... ")
+    printDebug("\nStarting Bluetooth Discovery... ",set.PRINT_DEBUG_GENERAL)
     
     while True:
         # Discover
@@ -859,13 +859,13 @@ async def bt_discover():
                 for dev in lstBtConnectedDevices:
                     dev['connected'] = False
                 
-                print("BT: No New iOT devices found.\n")
+                printDebug("BT: No New iOT devices found.\n",set.PRINT_DEBUG_BT)
                 
         else:
             showMsg = True
-            print(f"BT: Found {len(targets)} iOT devices")
+            printDebug(f"Bluetooth: Found {len(targets)} iOT devices",set.PRINT_DEBUG_BT)
             for dev in targets:
-                print(f"{dev.name}")
+                printDebug(f"{dev.name}",set.PRINT_DEBUG_BT)
              
             # track which devices were seen
             seen_addresses = [d.address for d in targets]
@@ -887,10 +887,10 @@ async def bt_connect(device):
 
     # Already have a client?
     if address in BT_CLIENTS and BT_CLIENTS[address].is_connected:
-        printDebug(f"Already connected: {device.name} ({address}) ")
+        printDebug(f"Already connected: {device.name} ({address}) ",set.PRINT_DEBUG_BT)
         return True
 
-    print(f"Connecting BT : {device.name} ({address}) ... ")
+    printDebug(f"Connecting BT : {device.name} ({address}) ... ",set.PRINT_DEBUG_GENERAL)
     
     client = BleakClient(device)
 
@@ -898,12 +898,12 @@ async def bt_connect(device):
         await client.connect()
 
         if not client.is_connected:
-            print(f"ERROR bt_connect(), FAILED {device.name}")
+            printDebug(f"ERROR bt_connect(), FAILED {device.name}",set.PRINT_DEBUG_ERROR)
             return False
 
         # Register disconnect handler
         # client.set_disconnected_callback(
-        #     lambda c: print(f"DISCONNECTED: {device.name} [{address}]")
+        #     lambda c: printDebug(f"DISCONNECTED: {device.name} [{address}]",set.PRINT_DEBUG_ERROR)
         # )
 
         await client.start_notify(CHAR_UUID, bt_notification_handler)
@@ -911,11 +911,11 @@ async def bt_connect(device):
         # Store and reuse this client
         BT_CLIENTS[address] = client
 
-        print(f"SUCCESSFUL")
+        printDebug(f"SUCCESSFUL",set.PRINT_DEBUG_GENERAL)
         return True
 
     except Exception as e:
-        print(f"ERROR: bt_connect(), {device.name}: {e}")
+        printDebug(f"ERROR: bt_connect(), {device.name}: {e}", set.PRINT_DEBUG_ERROR)
         return False
 async def bt_update_connection_status(device):
     global lstBtConnectedDevices
@@ -937,42 +937,42 @@ async def bt_update_connection_status(device):
                 CONNECT_TIME: date_time
             }
             lstBtConnectedDevices.append(existing)
-            printDebug(f"New Device Found: {name} ({addr})")
+            printDebug(f"New Device Found: {name} ({addr})",set.PRINT_DEBUG_GENERAL)
         else:
             existing[CONNECT_STATUS] = False
 
         client = bt_get_client(device)
 
         if client and client.is_connected:
-            printDebug(f"Update Connection status: true")
+            printDebug(f"Update Connection status: true", set.PRINT_DEBUG_GENERAL)
             existing[CONNECT_STATUS] = True
             existing[CONNECT_TIME] = date_time
 
     except Exception as e:
-        print(f"ERROR: bt_update_connection_status(), {device.name}: {e}")
+        printDebug(f"ERROR: bt_update_connection_status() {device.name}: {e}", set.PRINT_DEBUG_ERROR)
         return False
     
-    printDebug(f"Updating connection status...")
+    printDebug(f"Updating connection status...", set.PRINT_DEBUG_GENERAL)
     return True
 async def bt_send_credentials(device):
     try:
-        printDebug("Sending Credentials... ")
+        printDebug("Sending Credentials... ", set.PRINT_DEBUG_GENERAL)
     
         cred = f"{CMD_SHARED_WIFI_CREDENTIALS}:{WIFI_SSID}>{WIFI_PASSWORD}>{IP_ADDRESS}"
         client = bt_get_client(device)
     
-        printDebug(f"Get Client: {client.name}")
+        printDebug(f"Get Client: {client.name}", set.PRINT_DEBUG_GENERAL)
     
         if client and client.is_connected:
             await client.write_gatt_char(CHAR_UUID, cred.encode(), response=True)
-            printDebug("Done\n")
+            printDebug("Done", set.PRINT_DEBUG_GENERAL)
             return True
 
     except Exception as e:
-        print(f"ERROR: bt_send_credentials(), {device.name}: {e}")
+        printDebug(f"ERROR: bt_send_credentials() {device.name}: {e}", set.PRINT_DEBUG_BT)
         return False    
 def bt_get_name():
-    printDebug("Getting Bluetooth Name... ")
+    printDebug("Getting Bluetooth Name... ",set.PRINT_DEBUG_GENERAL)
     try:
         result = subprocess.run(
             ["bluetoothctl", "show"],
@@ -985,25 +985,25 @@ def bt_get_name():
             if "Alias:" in line:
                 # Extract the name after 'Alias:'
                 name = line.split("Alias:")[1].strip()
-                printDebug(f"My Name: {name}")
+                printDebug(f"My Name: {name}",set.PRINT_DEBUG_GENERAL)
                 return name
-        printDebug("Bluetooth name not found")
+        printDebug("Bluetooth name not found",set.PRINT_DEBUG_GENERAL)
         return ""
 
     except Exception as e:
-        print(f"Error: bt_get_name(), {e}")
+        printDebug(f"Error: bt_get_name(), {e}",set.PRINT_DEBUG_ERROR)
         return ""
 def bt_get_client(device):
-    printDebug(f"Getting BT Client for: {device.name} ({device.address}) ")
+    printDebug(f"Getting BT Client for: {device.name} ({device.address}) ",set.PRINT_DEBUG_GENERAL)
 
     if device.address in BT_CLIENTS and BT_CLIENTS[device.address].is_connected:
-        printDebug(f"Already connected: {device.name} ({device.address}) ")
+        printDebug(f"BT Client Already connected: {device.name} ({device.address}) ",set.PRINT_DEBUG_GENERAL)
         return  BT_CLIENTS.get(device.address)
     else:
-        print(f"No BT Client found for: {device.name} ({device.address}) ")
+        printDebug(f"No BT Client found for: {device.name} ({device.address}) ",set.PRINT_DEBUG_ERROR)
         return None
 async def bt_notification_handler(sender, data):
-    printDebug(f"[notify] {sender}: {data}")
+    printDebug(f"[notify] {sender}: {data}",set.PRINT_DEBUG_GENERAL)
 
 async def main():
     global WIFI_SSID
@@ -1011,6 +1011,7 @@ async def main():
     global BT_NAME
     global IP_ADDRESS
     global mqtt_broker
+    global new_operator_data_available
     casePtr = 0
 
     while True:
@@ -1019,7 +1020,7 @@ async def main():
             # Get Unit Name
             case 0:
                 BT_NAME = bt_get_name()
-                print(f"\nBluetoothXXX Name: {BT_NAME}")
+                printDebug(f"\nBluetooth Name: {BT_NAME}",set.PRINT_DEBUG_BT)
 
                 # Firestore operator-version listener: start if UID already on disk, else after MQTT #CONNECT_BASE
                 user_id = read_user_id_from_file()
@@ -1031,29 +1032,29 @@ async def main():
             case 1:
                 if(args.wifi):
                    IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
-                   print(f"WIFI IP Address: {IP_ADDRESS}")
+                   printDebug(f"WIFI IP Address: {IP_ADDRESS}", set.PRINT_DEBUG_WIFI)
 
                    wifiname = checkWifiConnection()
                    if(wifiname):
                        wifiConnected = True
-                       print(f"WIFI Connected: {wifiname}")
+                       printDebug(f"WIFI Connected: {wifiname}",set.PRINT_DEBUG_WIFI)
                 else:
                    IP_ADDRESS = get_local_ip_address(INTERFACE_ETH)
-                   print(f"LAN IP Address: {IP_ADDRESS}")
+                   printDebug(f"LAN IP Address: {IP_ADDRESS}",set.PRINT_DEBUG_WIFI)
                     
                 casePtr+=1
             
             # Save IP to Firestore
             case 2:
                 if(fire_sync_ip_address(IP_ADDRESS)):
-                    print(f"Update Firestore IP: {IP_ADDRESS}")
+                    printDebug(f"Update Firestore IP: {IP_ADDRESS}",set.PRINT_DEBUG_GENERAL)
                 
                 casePtr+=1
             
             # Get Wifi Credenitials
             case 3:
                 WIFI_SSID,WIFI_PASSWORD = WifiCredentials.get_credentials(new_creds=args.newcreds, encrypt=args.encrypt)
-                print(f"SSID: {WIFI_SSID}")
+                printDebug(f"SSID: {WIFI_SSID}",set.PRINT_DEBUG_WIFI)
                 #print(f"Password: {WIFI_PASSWORD}") 
                 casePtr+=1
 
@@ -1078,6 +1079,13 @@ async def main():
             # Idle
             case 6:
                 await asyncio.sleep(0.1)
+
+                # New Operator Data Available
+                if new_operator_data_available:
+                    new_operator_data_available = False
+                    mqtt_broker.broadcastNewDataAvailable(IOT_TYPE_WHEEL)
+                    printDebug("New data available",set.PRINT_DEBUG_GENERAL)
+
                 try:
                     if not mqtt_broker.queue.empty():
                         message = mqtt_broker.queue.get_nowait()
@@ -1129,67 +1137,4 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 
-# OLD
-async def xbt_connect(device):
-    print(f"Connecting to {device.name} ({device.address})")
-
-    try:
-        async with BleakClient(device) as client:
-            if not client.is_connected:
-                print(f"{device.name} not Connected")
-                await client.connect()
-
-                if not client.is_connected:
-                    print(f"{device.name} Failed to connect.")
-                    return False
-
-                await client.start_notify(CHAR_UUID, bt_notification_handler)
-            else:
-                print(f"{device.name} Connected")
-    except Exception as e:
-        print("Error with device:", e)
-    
-    return True
-async def bt_handshake(device):
-    print(f"Handshaking to {device.name} ({device.address})")
-
-    try:
-        async with BleakClient(device) as client:
-            if not client.is_connected:
-                await client.connect()
-
-            if not client.is_connected:
-                print("Failed to connect.")
-                return
-
-            await client.start_notify(CHAR_UUID, bt_notification_handler)
-
-            # write handshake
-            name = device.name or ""
-            ackClient = "BT_ACK_FROM_CLIENT_" + name.lower()
-            ackServer = "BT_ACK_FROM_SERVER_" + name.lower()
-            
-            print("TX (Handshake): " + ackClient)
-            await client.write_gatt_char(CHAR_UUID, ackClient.encode(), response=True)
-            
-            # read characteristic directly
-            try:
-                val = await client.read_gatt_char(CHAR_UUID)
-                try:
-                    print("RX (Handshake):", val.decode())
-                    
-                    if(val.decode() == ackServer):
-                        print("Handshake PASS");  
-                    else:
-                        print("Handshake FAIL");  
-                except:
-                    print("RX (error):", val)
-            except Exception as e:
-                print("Read failed:", e)
-
-            await client.stop_notify(CHAR_UUID)
-            print("Disconnected")
-
-    except Exception as e:
-        print("Error with device:", e)
 
