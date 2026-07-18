@@ -4,10 +4,12 @@ import os
 import time
 from queue import Queue
 from queue import Full
+import MqttCredentials
 import paho.mqtt.client as mqtt
 from paho.mqtt.properties import Properties
 from paho.mqtt.packettypes import PacketTypes
-import Settings as set
+import Settings as cfg
+import MqttCredentials
 
 #client.connect("broker_ip", 1883, properties=props)
 
@@ -36,6 +38,8 @@ MQTT_SETTING_TICKS_PER_M = "ticksPerM"
 MQTT_SETTING_IOT_TYPE = "iotType"
 MQTT_SETTING_USER_ID = "userId"
 MQTT_SETTING_DOC_ID = "docId"
+MQTT_SETTING_MQTT_USER = MqttCredentials.MQTT_PAYLOAD_USER
+MQTT_SETTING_MQTT_PW = MqttCredentials.MQTT_PAYLOAD_PW
 
 #MQTT Commands
 MQTT_CMD_DISCOVERY = "#DISCOVER"
@@ -70,26 +74,34 @@ class MqttServer:
             self, 
             client_id, 
             broker_ip="0.0.0.0", 
-            port=1883
+            port=1883,
+            mqtt_username=None,
+            mqtt_password=None,
             ):
         
         self.client_id = client_id
         self.broker_ip = broker_ip
         self.port = port
+        self.mqtt_username = mqtt_username or ""
+        self.mqtt_password = mqtt_password or ""
         self.queue = Queue(maxsize=50)
         
-        # Example settings
+        # Example settings (Android can request via #REQ_SETTINGS)
         self.settings = {
             "volume": 80,
             "brightness": 50,
-            "mode": "auto"
+            "mode": "auto",
         }
+        self.settings.update(MqttCredentials.get_mqtt_payload_for_role("android"))
 
         # Create MQTT client
         self.client = mqtt.Client(
             client_id = self.client_id, 
             protocol=mqtt.MQTTv5
             )
+
+        if self.mqtt_username and self.mqtt_password:
+            self.client.username_pw_set(self.mqtt_username, self.mqtt_password)
         
         # Bind callbacks
         self.client.on_connect = self.on_connect
@@ -101,6 +113,18 @@ class MqttServer:
     # -----------------------------
     async def connectMqtt(self):
         print(f"MQTT Connecting {self.broker_ip}:{self.port} ... ")
+        if not self.mqtt_username or not self.mqtt_password:
+            try:
+                import MqttCredentials
+                cred_path = MqttCredentials.MQTT_CREDS_FILE
+            except Exception:
+                cred_path = "~/Secure/mqtt_credentials.json"
+            print(
+                f"ERROR: MQTT credentials missing for user '{self.mqtt_username or '?'}'. "
+                f"Expected file: {cred_path}\n"
+                "Run as your Pi user (not sudo): python3 MqttCredentials.py --setup"
+            )
+            return False
 
         props = Properties(PacketTypes.CONNECT)
         props.SessionExpiryInterval = 60  # in seconds, 0 = never store, max ~4B
@@ -113,13 +137,14 @@ class MqttServer:
             properties=props
         )
         self.client.loop_start()
+        return True
     def decode_payload(self, payload):
         if isinstance(payload, dict):
-            self.printDebug(f"DECODE: JSON", set.PRINT_DEBUG_GENERAL)
+            self.printDebug(f"DECODE: JSON", cfg.PRINT_DEBUG_GENERAL)
             return payload
         if isinstance(payload, str):
             try:
-                self.printDebug(f"DECODE: STRING", set.PRINT_DEBUG_GENERAL)
+                self.printDebug(f"DECODE: STRING", cfg.PRINT_DEBUG_GENERAL)
                 return json.loads(payload)
             except json.JSONDecodeError:
                 return payload
@@ -129,6 +154,10 @@ class MqttServer:
     def printDebug(self, msg, enabled):
         if enabled:
             print('\n' + msg)
+    def _iot_mqtt_payload(self) -> dict:
+        return MqttCredentials.get_mqtt_payload_for_role("iot")
+    def _android_mqtt_payload(self) -> dict:
+        return MqttCredentials.get_mqtt_payload_for_role("android")
     def sendOperators(self, operators_list, operators_version):
         global SYNC_REQUESTED_FROM_DEVICE_ID
     
@@ -151,7 +180,7 @@ class MqttServer:
         }
 
         self.client.publish(response_topic, json.dumps(txPayload))
-        self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)  
+        self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)  
         SYNC_REQUESTED_FROM_DEVICE_ID = ""
     def broadcastNewDataAvailable(self, iot_type):               
         response_topic = f"{MQTT_TOPIC_TO_IOT}"
@@ -167,7 +196,7 @@ class MqttServer:
         }
 
         self.client.publish(response_topic, json.dumps(txPayload))
-        self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)  
+        self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)  
 
     # -----------------------------
     # Callbacks
@@ -175,14 +204,24 @@ class MqttServer:
     def on_connect(self, client, userdata, flags, reason_code, properties):
         global TAG_REQUESTED_FROM_DEVICE_ID
         global showedReconnectMsg
-        
-        self.printDebug(f"MQTT Connected: {reason_code}", set.PRINT_DEBUG_MQTT)
+
+        failed = getattr(reason_code, "is_failure", None)
+        if failed is True:
+            print(
+                f"ERROR: MQTT connect failed: {reason_code} "
+                f"(user={self.mqtt_username!r}). "
+                "Check ~/Secure/mqtt_credentials.json matches /etc/mosquitto/passwd — "
+                "re-run: python3 MqttCredentials.py --setup"
+            )
+            return
+
+        self.printDebug(f"MQTT Connected: {reason_code}", cfg.PRINT_DEBUG_MQTT)
         
         client.subscribe(MQTT_TOPIC_FROM_IOT)
-        self.printDebug(f"MQTT Subscribed: {MQTT_TOPIC_FROM_IOT}", set.PRINT_DEBUG_MQTT)
+        self.printDebug(f"MQTT Subscribed: {MQTT_TOPIC_FROM_IOT}", cfg.PRINT_DEBUG_MQTT)
  
         client.subscribe(MQTT_TOPIC_FROM_ANDROID)
-        self.printDebug(f"MQTT Subscribed: {MQTT_TOPIC_FROM_ANDROID}", set.PRINT_DEBUG_MQTT)
+        self.printDebug(f"MQTT Subscribed: {MQTT_TOPIC_FROM_ANDROID}", cfg.PRINT_DEBUG_MQTT)
         showedReconnectMsg = False
     def on_message(self, client, userdata, msg):
         global TAG_REQUESTED_FROM_DEVICE_ID
@@ -190,7 +229,7 @@ class MqttServer:
         global SYNC_REQUESTED_FROM_IOT_TYPE
 
         try:
-            self.printDebug(f"MQTT RX: {msg.payload.decode()}", set.PRINT_MQTT_COMMS)
+            self.printDebug(f"MQTT RX: {msg.payload.decode()}", cfg.PRINT_MQTT_COMMS)
        
             jsondata = json.loads(msg.payload.decode())
             from_id = jsondata.get(MQTT_SETTING_FROM_DEVICE_ID, "")
@@ -198,6 +237,7 @@ class MqttServer:
             payload = jsondata.get(MQTT_SETTING_PAYLOAD, "")
             command = jsondata.get(MQTT_SETTING_CMD, "")
             myId = self.client_id
+            
 
             # From Android
             if(msg.topic == MQTT_TOPIC_FROM_ANDROID):
@@ -220,29 +260,41 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
+
+                    # Notify main loop to enter BLE pair mode
+                    try:
+                        self.queue.put_nowait(jsondata)
+                    except Full:
+                        self.queue.get_nowait()
+                        self.queue.put_nowait(jsondata)
             
                 # Found Monitor
                 if(command == MQTT_CMD_FOUND_MONITOR):
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
+
+                    out_payload = payload if isinstance(payload, dict) else {}
+                    out_payload.update(self._iot_mqtt_payload())
                     
                     # Build JSON payload
                     txPayload = {
                         MQTT_SETTING_FROM_DEVICE_ID: from_id,
                         MQTT_SETTING_TO_DEVICE_ID: to_id,
                         MQTT_SETTING_TOPIC: response_topic,
-                        MQTT_SETTING_PAYLOAD: payload,
+                        MQTT_SETTING_PAYLOAD: out_payload,
                         MQTT_SETTING_CMD:MQTT_CMD_FOUND_MONITOR
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
                     
                 # Request Settings
                 if(command == MQTT_CMD_SETTINGS):
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
-                    client.publish(response_topic, json.dumps(self.settings))
-                    self.printDebug(f"MQTT TX: {self.settings} {response_topic}", set.PRINT_MQTT_COMMS)
+                    settings = dict(self.settings)
+                    settings.update(self._android_mqtt_payload())
+                    client.publish(response_topic, json.dumps(settings))
+                    self.printDebug(f"MQTT TX: {settings} {response_topic}", cfg.PRINT_MQTT_COMMS)
                     # Add BaseStation LIST here
 
                 # Calibrate Monitor
@@ -253,6 +305,7 @@ class MqttServer:
                     settings = {
                         MQTT_SETTING_IOT_TYPE: iot_type,
                     }
+                    settings.update(self._iot_mqtt_payload())
 
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
                     
@@ -265,7 +318,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # Connect to Monitor
                 if(command == MQTT_CMD_CONNECT_MONITOR):
@@ -277,6 +330,7 @@ class MqttServer:
                         MQTT_SETTING_IOT_TYPE: iot_type,
                         MQTT_SETTING_TICKS_PER_M: ticks,
                     }
+                    settings.update(self._iot_mqtt_payload())
 
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
                     
@@ -289,7 +343,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # Disconnect to Monitor
                 if(command == MQTT_CMD_DISCONNECT_MONITOR): 
@@ -304,7 +358,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # PING (Check if Base is there)
                 if(command == MQTT_CMD_PING):         
@@ -318,23 +372,27 @@ class MqttServer:
                     }
 
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # Connect Base Station
                 #!!!! Payload Has UID for Firestore User !!!!
                 if(command == MQTT_CMD_CONNECT_BASE): 
                                     
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
-                    
+
+                    out_payload = payload if isinstance(payload, dict) else {}
+                    out_payload.update(self._android_mqtt_payload())
+
                     txPayload = {
                         MQTT_SETTING_FROM_DEVICE_ID: myId,
                         MQTT_SETTING_TO_DEVICE_ID: from_id,
                         MQTT_SETTING_TOPIC: response_topic,
-                        MQTT_SETTING_CMD:MQTT_CMD_CONNECT_BASE
+                        MQTT_SETTING_CMD:MQTT_CMD_CONNECT_BASE,
+                        MQTT_SETTING_PAYLOAD: out_payload
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                     # Start Queue for pushing operator list to firestore
                     try:
@@ -357,23 +415,11 @@ class MqttServer:
                     TAG_REQUESTED_FROM_DEVICE_ID = from_id
 
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
             
             # From IOT
             if(msg.topic == MQTT_TOPIC_FROM_IOT):
-                #iot_id = requester_id
-
-                # Rx Device ID (Subscribe Private Topic)
-                if(command == MQTT_CMD_DEVICE_ID):
-                    topic = f"{MQTT_TOPIC_FROM_IOT}/{from_id}"
-                    client.subscribe(topic)
-                    self.printDebug(f"Auto Subscribe: {topic}", set.PRINT_DEBUG_MQTT)
-
-                # IOT Settings 
-                if(command == MQTT_CMD_SETTINGS):
-                    self.printDebug(f"MQTT TX: {self.settings} {response_topic}", set.PRINT_MQTT_COMMS)
-
-                # Pair - Scan Monitor ID 
+                 # Pair - Scan Monitor ID 
                 if(command == MQTT_CMD_DISCOVERY):
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
                     
@@ -385,7 +431,42 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
+
+                # FROM HERE ONLY PAIRED DEVICES CAN RESPOND
+                #
+                if not cfg.is_iot_paired(ble_address="", ble_name=from_id):
+                    self.printDebug(f"MQTT Block: {from_id} not paired", cfg.PRINT_MQTT_COMMS)
+                    # Unpaired IoT PINGing this base → tell it via BLE to stop MQTT
+                    if command == MQTT_CMD_PING:
+                        try:
+                            self.queue.put_nowait({
+                                MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                                MQTT_SETTING_CMD: cfg.CMD_BLE_SHOESH,
+                            })
+                        except Full:
+                            try:
+                                self.queue.get_nowait()
+                            except Exception:
+                                pass
+                            try:
+                                self.queue.put_nowait({
+                                    MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                                    MQTT_SETTING_CMD: cfg.CMD_BLE_SHOESH,
+                                })
+                            except Full:
+                                pass
+                    return
+
+                # Rx Device ID (Subscribe Private Topic)
+                if(command == MQTT_CMD_DEVICE_ID):
+                    topic = f"{MQTT_TOPIC_FROM_IOT}/{from_id}"
+                    client.subscribe(topic)
+                    self.printDebug(f"Auto Subscribe: {topic}", cfg.PRINT_DEBUG_MQTT)
+
+                # IOT Settings 
+                if(command == MQTT_CMD_SETTINGS):
+                    self.printDebug(f"MQTT TX: {self.settings} {response_topic}", cfg.PRINT_MQTT_COMMS)
                   
                 # ACK 
                 if(command == MQTT_CMD_ACK):                     
@@ -399,7 +480,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
      
                 # PING 
                 if(command == MQTT_CMD_PING):                     
@@ -413,7 +494,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
      
                 # Live Monitor Data
                 if(command == MQTT_CMD_LIVE_MONITOR_DATA):                 
@@ -427,7 +508,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # IOT Data (Push to Cloud)
                 if(command == MQTT_CMD_IOT_DATA):                 
@@ -441,7 +522,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)    
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)    
 
                     # Queue for processing in main loop (to avoid doing heavy processing in callback)
                     try:
@@ -462,7 +543,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # Connect  (IOT to Android)
                 if(command == MQTT_CMD_CONNECT_MONITOR):                 
@@ -476,7 +557,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # DisConnect  (IOT to Android)
                 if(command == MQTT_CMD_DISCONNECT_MONITOR):                 
@@ -490,7 +571,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # Tag Data (IOT to Android) (Send TAG to enroll Operator)
                 if(command == MQTT_CMD_TAG_DATA):    
@@ -506,7 +587,7 @@ class MqttServer:
                         }
             
                         client.publish(response_topic, json.dumps(txPayload))
-                        self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)
+                        self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
      
                 # Sync 
                 if(command == MQTT_CMD_SYNC):    
@@ -522,7 +603,7 @@ class MqttServer:
                     }
         
                     client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", set.PRINT_MQTT_COMMS)     
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)     
     
                     # Queue for processing in main loop (to avoid doing heavy processing in callback)
                     try:
@@ -532,26 +613,26 @@ class MqttServer:
                         self.queue.put_nowait(jsondata)
         
         except Exception as e:
-            self.printDebug(f"MQTT Error: {self.client_id}: {e}", set.PRINT_DEBUG_ERROR)
+            self.printDebug(f"MQTT Error: {self.client_id}: {e}", cfg.PRINT_DEBUG_ERROR)
             return
         
         except json.JSONDecodeError as e:  
-            self.printDebug(f"Invalid JSON received {self.client_id}: {e}", set.PRINT_DEBUG_ERROR)
+            self.printDebug(f"Invalid JSON received {self.client_id}: {e}", cfg.PRINT_DEBUG_ERROR)
             return
     def on_disconnect(self, client, userdata, rc, properties=None):
-        self.printDebug(f"MQTT Disconnected: {rc}", set.PRINT_DEBUG_ERROR)
+        self.printDebug(f"MQTT Disconnected: {rc}", cfg.PRINT_DEBUG_ERROR)
         global showedReconnectMsg
 
          # AUTO-RECONNECT
         while True:
             try: 
                 if(not showedReconnectMsg):
-                    self.printDebug("Reconnecting WiFi ...", set.PRINT_DEBUG_WIFI)
+                    self.printDebug("Reconnecting WiFi ...", cfg.PRINT_DEBUG_WIFI)
                     showedReconnectMsg = True
                 client.reconnect()
                 return
             except Exception as e:
-                #self.printDebug(f"ERROR: on_disconnect(), {e}", set.PRINT_DEBUG_ERROR)
+                #self.printDebug(f"ERROR: on_disconnect(), {e}", cfg.PRINT_DEBUG_ERROR)
                 time.sleep(2)
 
 

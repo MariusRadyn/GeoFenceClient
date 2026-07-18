@@ -83,15 +83,32 @@ else
     pip install firebase-admin
 fi
 
-# ---------- 10. Install MQQT ----------
-echo "Installing MQQT"
+# ---------- 10. Install MQTT (Mosquitto) with authentication ----------
+echo "Installing MQTT (Mosquitto)..."
 
 sudo apt update
-sudo apt install mosquitto mosquitto-clients
+sudo apt install -y mosquitto mosquitto-clients
 sudo systemctl enable mosquitto
-pip install paho-mqtt
-echo -e "\nlistener 1883 0.0.0.0\nallow_anonymous true" | sudo tee -a /etc/mosquitto/mosquitto.conf
-sudo systemctl restart mosquitto
+pip install paho-mqtt cryptography
+
+# Secure dir (matches GeoFenceClient ~/Secure)
+mkdir -p "$HOME/Secure"
+chmod 700 "$HOME/Secure"
+
+# Enable username/password auth; disables anonymous access
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MQTT_CREDS_SCRIPT="$SCRIPT_DIR/MqttCredentials.py"
+if [ -f "$MQTT_CREDS_SCRIPT" ]; then
+    echo "Running MqttCredentials.py --setup ..."
+    python3 "$MQTT_CREDS_SCRIPT" --setup
+    echo "MQTT broker configured with authentication (allow_anonymous false)."
+    echo "Credentials file: $HOME/Secure/mqtt_credentials.json"
+else
+    echo "ERROR: MqttCredentials.py not found at $MQTT_CREDS_SCRIPT"
+    echo "Place MqttCredentials.py next to ConfigureRaspberry.sh and re-run."
+    exit 1
+fi
+echo "Optional: restrict LAN access with: sudo ufw allow from 192.168.0.0/16 to any port 1883"
 
 # ---------- 11. Install Bleak ----------
 echo "Installing Bleak"
@@ -110,7 +127,8 @@ echo "$BLE_NAME"
 sudo bluetoothctl system-alias "$BLE_NAME" 
 
 # ---------- 14. Make secure Dir ----------
-mkdir -p /etc/secure
+mkdir -p "$HOME/Secure"
+chmod 700 "$HOME/Secure"
 
 echo "Python version in venv:"
 python --version
