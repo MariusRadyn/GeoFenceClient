@@ -144,6 +144,13 @@ FIRE_MONITOR_IMAGE_FILENAME = "imageFilename"
 FIRE_MONITOR_ID = "monitorId"
 FIRE_MONITOR_MARKED_FOR_DELETE = "markedToDelete"
 
+_shoesh_last_sent: dict = {}  # ble_name -> monotonic time
+_SHOESH_COOLDOWN_S = 10
+
+# Lock guards the on-disk offline queue against concurrent access.
+# Today only the main loop writes to it, but firestore listeners run on
+# their own thread, so cheap insurance.
+_iot_queue_lock = threading.Lock()
 
 @dataclass
 class MONITOR_DATA:
@@ -154,7 +161,6 @@ class MONITOR_DATA:
     image_filename: str = ""
     mon_: str = ""
     mon_type: str = ""
-
 
 MONITOR_DATA_LIST: List[MONITOR_DATA] = []
 
@@ -173,13 +179,12 @@ monitors_listener_uid = None
 monitors_doc_ref = None
 new_operator_data_available = False
 
-
 # Firestore write tuning (kept short so a network blip doesn't freeze the device for 60s)
 FIRESTORE_WRITE_TIMEOUT = 15  # seconds, per attempt
 FIRESTORE_RETRY_BACKOFF = (1, 3, 9)  # delays between attempts; len = retries after first try
 FIRESTORE_OFFLINE_QUEUE_MAX = 5000  # cap so disk doesn't grow forever
 
-# Firestore Listeners
+# Firestore / Monitor Listeners
 def on_snapshot_operator(doc_snapshot, changes, read_time):
     global operators_version
     global new_operator_data_available
@@ -278,28 +283,6 @@ def on_snapshot_monitors(doc_snapshot, changes, read_time):
 
     for mon_id, mon_device_id, mon_name in to_delete:
         _delete_marked_monitor(mon_id, mon_device_id, mon_name)
-
-
-def _delete_marked_monitor(mon_doc_id: str, mon_device_id: str = "", mon_name: str = ""):
-    """Remove from paired list, then delete the Firestore monitor document."""
-    uid = monitors_listener_uid
-    if not uid:
-        printDebug("ERROR: cannot delete monitor — no monitors listener uid", cfg.PRINT_DEBUG_ERROR)
-        return
-
-    remove_paired_iot(ble_name=mon_device_id or mon_name)
-    printDebug(
-        f"Removed from paired list: device_id={mon_device_id!r} name={mon_name!r}",
-        cfg.PRINT_DEBUG_MONITOR,
-    )
-
-    try:
-        dbFire.collection(FIRE_COLLECT_USERS).document(uid) \
-            .collection(FIRE_COLLECT_MONITORS).document(mon_doc_id) \
-            .delete()
-        printDebug(f"Deleted Firestore monitor: {mon_doc_id}", cfg.PRINT_DEBUG_FIRESTORE)
-    except Exception as e:
-        printDebug(f"ERROR: delete monitor {mon_doc_id}: {e}", cfg.PRINT_DEBUG_ERROR)
 def start_monitors_listener(uid):
     """Attach Firestore snapshot listener for monitors; Watch Monitor Name, imageURL, imageFilename."""
     global MONITOR_DATA_LIST, monitors_doc_ref, monitors_listener_uid
@@ -335,6 +318,7 @@ def start_monitors_listener(uid):
         monitors_listener_uid = None
         return False
 
+# Methods
 def _resolve_uid_from_payload(payload) -> str:
     """Accept userId or userDocId from Android CONNECT_BASE payload."""
     if not isinstance(payload, dict):
@@ -352,8 +336,26 @@ def _resolve_uid_from_payload(payload) -> str:
         or ""
     )
     return str(uid).strip()
+def _delete_marked_monitor(mon_doc_id: str, mon_device_id: str = "", mon_name: str = ""):
+    """Remove from paired list, then delete the Firestore monitor document."""
+    uid = monitors_listener_uid
+    if not uid:
+        printDebug("ERROR: cannot delete monitor — no monitors listener uid", cfg.PRINT_DEBUG_ERROR)
+        return
 
+    remove_paired_iot(ble_name=mon_device_id or mon_name)
+    printDebug(
+        f"Removed from paired list: device_id={mon_device_id!r} name={mon_name!r}",
+        cfg.PRINT_DEBUG_MONITOR,
+    )
 
+    try:
+        dbFire.collection(FIRE_COLLECT_USERS).document(uid) \
+            .collection(FIRE_COLLECT_MONITORS).document(mon_doc_id) \
+            .delete()
+        printDebug(f"Deleted Firestore monitor: {mon_doc_id}", cfg.PRINT_DEBUG_FIRESTORE)
+    except Exception as e:
+        printDebug(f"ERROR: delete monitor {mon_doc_id}: {e}", cfg.PRINT_DEBUG_ERROR)
 def get_monitor_data_by_device_id(iot_device_id: str) -> Optional[MONITOR_DATA]:
     """Return the monitor whose mon_device_id matches the IoT device id, or None."""
     if not iot_device_id:
@@ -365,9 +367,6 @@ def get_monitor_data_by_device_id(iot_device_id: str) -> Optional[MONITOR_DATA]:
         if mon.mon_device_id == device_id:
             return mon
     return None
-
-
-# Methods
 def checkWifiConnection():
     try:
         # Get IP address for the specified interface
@@ -504,7 +503,6 @@ def fire_write_ip_adr(bt_name="",ip_address=""):
         printDebug(f"Firestore Write: {bt_name}@{ip_address}",cfg.PRINT_DEBUG_FIRESTORE)
     except Exception as e:
         printDebug(f"ERROR: fire_write_ip_adr(), writing to Firestore: {e}",cfg.PRINT_DEBUG_ERROR)
-
 def fire_write_mqtt_creds(bt_name=""):
     """Push mqttUser/mqttPw to clients/{bt_name} (merge). Same doc as IP."""
     if bt_name == "":
@@ -553,13 +551,6 @@ def _resolve_timestamp(epoch):
 
     printDebug(f"Warning: timestamp {epoch_int} out of range, using current UTC time",cfg.PRINT_DEBUG_ERROR)
     return datetime.now(timezone.utc)
-
-
-# Lock guards the on-disk offline queue against concurrent access.
-# Today only the main loop writes to it, but firestore listeners run on
-# their own thread, so cheap insurance.
-_iot_queue_lock = threading.Lock()
-
 def _iot_queue_load():
     """Return list of pending writes; empty list if file is missing or unreadable."""
     if not os.path.exists(iot_offline_file):
@@ -910,9 +901,9 @@ def fire_sync_operator_list(iot_operators_version = "0"):
     except Exception as e:
         printDebug(f"ERROR: sync_operator_list: {e}",cfg.PRINT_DEBUG_ERROR)
         return False
-    
-# Bluetooth Methods
 
+
+# Bluetooth 
 def _load_paired_iots():
     """Load paired IoT list from disk into Settings.PAIRED_IOTS."""
     with cfg._paired_iots_lock:
@@ -924,11 +915,11 @@ def _load_paired_iots():
             with open(cfg.paired_iots_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             cfg.PAIRED_IOTS = data if isinstance(data, list) else []
-            printDebug(f"Loaded {len(cfg.PAIRED_IOTS)} paired IoT(s)", cfg.PRINT_DEBUG_MONITOR)
+            printDebug(f"Loaded {len(cfg.PAIRED_IOTS)} paired IoT(s)", True)
 
             names = [e.get("ble_name", "") for e in cfg.PAIRED_IOTS if e.get("ble_name")]
             if names:
-                printDebug("\n".join(f"   {n}" for n in names), cfg.PRINT_DEBUG_MONITOR)
+                printDebug("\n".join(f"   {n}" for n in names), True)
         except Exception as e:
             printDebug(f"ERROR: load paired IoTs: {e}", cfg.PRINT_DEBUG_ERROR)
             cfg.PAIRED_IOTS = []
@@ -952,7 +943,6 @@ def enter_pair_mode(seconds: int = cfg.PAIR_MODE_SECONDS):
     printDebug(f"Pair mode ON (all unknown iOT) for {seconds}s", cfg.PRINT_DEBUG_MONITOR)
 def is_pair_mode_active() -> bool:
     return time.monotonic() < cfg.pair_mode_until
-
 def allow_iot_pair_for_ble(device_id: str = "", ble_name: str = "", seconds: int = cfg.PAIR_MODE_SECONDS):
     """IoT announced pair mode — allow BLE WiFi creds for that device only."""
     keys = []
@@ -969,7 +959,6 @@ def allow_iot_pair_for_ble(device_id: str = "", ble_name: str = "", seconds: int
         cfg.PRINT_DEBUG_MONITOR,
     )
     return True
-
 def add_paired_iot(ble_address: str = "", ble_name: str = "") -> bool:
     """Add or update a paired IoT. Returns True if list changed."""
     addr = (ble_address or "").strip().upper()
@@ -1037,8 +1026,6 @@ def should_send_ble_credentials(device) -> bool:
         cfg.PRINT_DEBUG_BT,
     )
     return False
-
-
 async def bt_discover():
     global lstBtConnectedDevices
     reported_no_devices = False
@@ -1164,12 +1151,6 @@ async def bt_update_connection_status(device):
         return False
     
     return True
-
-
-_shoesh_last_sent: dict = {}  # ble_name -> monotonic time
-_SHOESH_COOLDOWN_S = 10
-
-
 async def bt_send_shoesh(device) -> bool:
     """Tell IoT to stop MQTT to this base (not paired / wrong base)."""
     try:
@@ -1184,8 +1165,6 @@ async def bt_send_shoesh(device) -> bool:
     except Exception as e:
         printDebug(f"ERROR: bt_send_shoesh() {getattr(device, 'name', '?')}: {e}", cfg.PRINT_DEBUG_BT)
         return False
-
-
 async def bt_send_shoesh_to_iot(ble_name: str) -> bool:
     """Find a connected BLE IoT by name (MQTT from id) and send SHOESH."""
     name = (ble_name or "").strip()
@@ -1223,8 +1202,6 @@ async def bt_send_shoesh_to_iot(ble_name: str) -> bool:
         _shoesh_last_sent[name] = now
         return True
     return False
-
-
 async def bt_send_credentials(device):
     try:
         if not should_send_ble_credentials(device):
@@ -1282,8 +1259,6 @@ def bt_get_client(device):
 async def bt_notification_handler(sender, data):
     """Legacy unused; prefer per-device handler from bt_connect."""
     printDebug(f"[notify] {sender}: {data}", cfg.PRINT_DEBUG_GENERAL)
-
-
 async def bt_on_iot_notify(device, data):
     """
     IoT → Base over BLE:
@@ -1315,24 +1290,22 @@ async def bt_on_iot_notify(device, data):
         cfg.allow_iot_pair(addr, remaining)
         cfg.allow_iot_pair(name, remaining)
         printDebug(f"BLE ({name}): PAIRING", True)
-        printDebug(f"BLE ({name}): sending WiFi creds...", cfg.PRINT_DEBUG_BT)
 
         if await bt_send_credentials(device):
             add_paired_iot(ble_address=addr, ble_name=name)
-            printDebug(f"BLE ({name}): creds sent (waiting for WIFI_OK)", True)
+            printDebug(f"BLE ({name}): Sent Credentials (Waiting for WIFI_OK)", True)
         return
 
     if cmd == cfg.CMD_BLE_WIFI_OK:
         # Stop further BLE credential writes so IoT can receive MQTT #PING
         cfg.clear_iot_pair(ble_address=addr, ble_name=name)
-        printDebug(f"BLE ({name}): WIFI_OK — stopped credential resends", True)
+        printDebug(f"BLE ({name}): WIFI_OK", True)
         return
 
     if cmd == cfg.CMD_BLE_IDLE:
         cfg.clear_iot_pair(ble_address=addr, ble_name=name)
-        printDebug(f"BLE ({name}): IDLE", cfg.PRINT_DEBUG_BT)
+        printDebug(f"BLE ({name}): IDLE", True)
         return
-
 
 async def main():
     global WIFI_SSID
@@ -1349,7 +1322,7 @@ async def main():
             # Get Unit Name
             case 0:
                 BT_NAME = bt_get_name()
-                printDebug(f"\nBluetooth Name: {BT_NAME}",cfg.PRINT_DEBUG_BT)
+                printDebug(f"\nBLE ID: {BT_NAME}",cfg.PRINT_DEBUG_BT)
                 _load_paired_iots()
                 casePtr+=1
             
@@ -1466,23 +1439,27 @@ async def main():
                      
                         # Sync IOT
                         elif command == MqttService.MQTT_CMD_SYNC:
+                            from_id = message.get(MqttService.MQTT_SETTING_FROM_DEVICE_ID, "")
                             iot_type = payload.get(MqttService.MQTT_SETTING_IOT_TYPE, "")
                             iot_operator_version = payload.get(MqttService.MQTT_SETTING_OPERATORS_VERSION, "")
                             
-                            # Sync Operators
-                            if iot_type == IOT_TYPE_WHEEL:
+                            # Sync Operators — send to this IoT only (not a shared global target)
+                            if iot_type == IOT_TYPE_WHEEL and from_id:
                                 if fire_sync_operator_list(iot_operator_version):
                                     operators = read_local_operators_from_file()
                                     if operators:
-                                        #new_operator_version = read_local_operators_ver_from_file()
-                                        mqtt_broker.sendOperators(operators, operators_version)
+                                        ver = read_local_operators_ver_from_file()
+                                        if ver is None:
+                                            ver = operators_version
+                                        mqtt_broker.sendOperators(
+                                            operators, ver, to_device_id=from_id
+                                        )
                      
                 except Empty:
                     pass
     
             case _:
                 await asyncio.sleep(10)
-
 
 if __name__ == "__main__":
     asyncio.run(main())

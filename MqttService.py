@@ -158,14 +158,17 @@ class MqttServer:
         return MqttCredentials.get_mqtt_payload_for_role("iot")
     def _android_mqtt_payload(self) -> dict:
         return MqttCredentials.get_mqtt_payload_for_role("android")
-    def sendOperators(self, operators_list, operators_version):
+    def sendOperators(self, operators_list, operators_version, to_device_id=None):
         global SYNC_REQUESTED_FROM_DEVICE_ID
-    
-        if SYNC_REQUESTED_FROM_DEVICE_ID == "":
+
+        # Prefer explicit target (per queued #SYNC). Global is only a legacy fallback
+        # and is unsafe when multiple IoTs sync at once after #NEW_DATA_AVAILABLE.
+        device_id = (to_device_id or SYNC_REQUESTED_FROM_DEVICE_ID or "").strip()
+        if not device_id:
             print(f"No sync requested. Ignoring sync.")
             return
                    
-        response_topic = f"{MQTT_TOPIC_TO_IOT}/{SYNC_REQUESTED_FROM_DEVICE_ID}"
+        response_topic = f"{MQTT_TOPIC_TO_IOT}/{device_id}"
         
         payload = {
             MQTT_SETTING_OPERATORS_LIST: operators_list  ,
@@ -180,8 +183,9 @@ class MqttServer:
         }
 
         self.client.publish(response_topic, json.dumps(txPayload))
-        self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)  
-        SYNC_REQUESTED_FROM_DEVICE_ID = ""
+        self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
+        if not to_device_id and SYNC_REQUESTED_FROM_DEVICE_ID == device_id:
+            SYNC_REQUESTED_FROM_DEVICE_ID = ""
     def broadcastNewDataAvailable(self, iot_type):               
         response_topic = f"{MQTT_TOPIC_TO_IOT}"
         payload = {
@@ -434,9 +438,9 @@ class MqttServer:
                     self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # FROM HERE ONLY PAIRED DEVICES CAN RESPOND
-                #
                 if not cfg.is_iot_paired(ble_address="", ble_name=from_id):
                     self.printDebug(f"MQTT Block: {from_id} not paired", cfg.PRINT_MQTT_COMMS)
+                    
                     # Unpaired IoT PINGing this base → tell it via BLE to stop MQTT
                     if command == MQTT_CMD_PING:
                         try:

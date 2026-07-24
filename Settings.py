@@ -10,7 +10,7 @@ PRINT_DEBUG_ERROR = True
 PRINT_DEBUG_WIFI = True
 PRINT_DEBUG_BT = True
 PRINT_DEBUG_FIRESTORE = True
-PRINT_DEBUG_MONITOR = True
+PRINT_DEBUG_MONITOR = False
 PRINT_DEBUG_OPERATOR = True
 PRINT_MQTT_COMMS = True
 PRINT_DEBUG_MQTT = False
@@ -36,6 +36,10 @@ pair_mode_until = 0.0  # monotonic deadline; 0 = inactive
 # ble address/name -> monotonic deadline (IoT sent PAIRING over BLE)
 iot_pair_allowed: dict = {}
 paired_iots_file = os.path.expanduser("~/Secure/paired_iots.json")
+
+#MQTT callbacks and the BLE/async main loop can touch that data from different threads. 
+# Helpers like is_iot_paired() and allow_iot_pair() use with _paired_iots_lock: 
+# so only one thread updates or reads that data at a time, avoiding races.
 _paired_iots_lock = threading.Lock()
 
 
@@ -51,8 +55,6 @@ def is_iot_paired(ble_address: str = "", ble_name: str = "") -> bool:
                 return True
             
     return False
-
-
 def allow_iot_pair(device_key: str, seconds: int = PAIR_MODE_SECONDS) -> bool:
     """Allow BLE WiFi-cred send for this IoT (address or BLE name) for a limited time."""
     key = (device_key or "").strip()
