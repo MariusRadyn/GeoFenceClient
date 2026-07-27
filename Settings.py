@@ -1,7 +1,35 @@
 # Debug
+import argparse
 import os
 import threading
 from typing import List
+import argparse
+
+# ----- Create Arguments ------
+# --newcreds : Create new wifi credentials
+parser = argparse.ArgumentParser(add_help=False)
+parser.add_argument(
+    "--newcreds", 
+    action="store_true",  # This makes it a boolean flag
+    help="Create new wifi credentials"
+)
+
+# --encrypt   : Encrypt wifi credentials
+parser.add_argument(
+    "--encrypt", 
+    action="store_true",  # This makes it a boolean flag
+    help="Encrypt wifi credentials"
+)
+
+# --wifi : ignore Ethernet Connection, Use
+#parser = argparse.ArgumentParser(description="GeoFence Client")
+parser.add_argument(
+    "--wifi", 
+    action="store_true",  # This makes it a boolean flag
+    help="Ignore Ethernet LAN, use Wifi connection"
+)
+
+args = parser.parse_args()
 
 
 PRINT_DEBUG_GENERAL = False

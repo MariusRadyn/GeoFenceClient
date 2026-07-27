@@ -42,8 +42,17 @@ MQTT_PAYLOAD_PW = "mqttPw"
 FIRE_COLLECT_CLIENTS = "clients"
 SERVICE_ACCOUNT_KEY = os.path.join(_resolve_secure_dir(), "ServiceAccountKey.json")
 
-MOSQUITTO_CONF = """# GeoFence — single listener; do not add another listener 1883 elsewhere
+MOSQUITTO_CONF = """# GeoFence — TCP for Android/IoT/Pi, WebSockets for Flutter web
+# Do not add another listener 1883 / 9001 elsewhere
+
+# MQTT over TCP (Android app, IoT devices, GeoFenceClient on Pi)
 listener 1883 0.0.0.0
+protocol mqtt
+
+# MQTT over WebSockets (Flutter web — browsers cannot use TCP 1883)
+listener 9001 0.0.0.0
+protocol websockets
+
 allow_anonymous false
 password_file /etc/mosquitto/passwd
 acl_file /etc/mosquitto/acl
@@ -270,7 +279,8 @@ def setup_mosquitto(force_creds: bool = False):
         sys.exit(1)
 
     printDebug(f"Mosquitto auth enabled. Credentials: {MQTT_CREDS_FILE}",set.PRINT_DEBUG_MQTT_CREDS)
-    printDebug("Roles: base (Pi), iot (devices), android (app)", set.PRINT_DEBUG_MQTT_CREDS)
+    printDebug("Roles: base (Pi), iot (devices), android (app/web)", set.PRINT_DEBUG_MQTT_CREDS)
+    printDebug("Listeners: TCP 1883 (native), WebSockets 9001 (Flutter web)", set.PRINT_DEBUG_MQTT_CREDS)
     push_credentials_to_firestore()
 
 def main():

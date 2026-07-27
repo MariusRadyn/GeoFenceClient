@@ -108,7 +108,9 @@ else
     echo "Place MqttCredentials.py next to ConfigureRaspberry.sh and re-run."
     exit 1
 fi
-echo "Optional: restrict LAN access with: sudo ufw allow from 192.168.0.0/16 to any port 1883"
+echo "Optional: restrict LAN access with:"
+echo "  sudo ufw allow from 192.168.0.0/16 to any port 1883"
+echo "  sudo ufw allow from 192.168.0.0/16 to any port 9001 comment 'MQTT WebSockets'"
 
 # ---------- 11. Install Bleak ----------
 echo "Installing Bleak"

@@ -16,7 +16,7 @@ import MqttService
 import MqttCredentials
 import Settings as cfg
 import WifiCredentials
-from WifiCredentials import parser as wifi_parser
+from Settings import args
 import os
 import time
 import threading
@@ -33,18 +33,18 @@ from typing import List, Optional
 # --newcreds : Create new wifi credentials
 # --encrypt   : Encrypt wifi credentials
 # --wifi : ignore Ethernet Connection, Use
-parser = argparse.ArgumentParser(description="GeoFence Client")
-parser.add_argument(
-    "--wifi", 
-    action="store_true",  # This makes it a boolean flag
-    help="Ignore Ethernet LAN, use Wifi connection"
-)
+# parser = argparse.ArgumentParser(description="GeoFence Client")
+# parser.add_argument(
+#     "--wifi", 
+#     action="store_true",  # This makes it a boolean flag
+#     help="Ignore Ethernet LAN, use Wifi connection"
+# )
 
-# Include wifi_parser arguments
-for action in wifi_parser._actions:
-    parser._add_action(action)
+# # Include wifi_parser arguments
+# for action in wifi_parser._actions:
+#     parser._add_action(action)
 
-args = parser.parse_args()
+#args = parser.parse_args()
 
 # Settings
 home_dir = os.path.expanduser("~")
