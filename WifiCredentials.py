@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from getpass import getpass
 from cryptography.fernet import Fernet
 
@@ -101,7 +102,7 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0"):
         add = subprocess.run(add_cmd, capture_output=True, text=True, timeout=15)
         if add.returncode != 0:
             err = (add.stderr or add.stdout or "").strip()
-            print(f"WiFi verify failed (add): {err or f'exit {add.returncode}'}")
+            print(f"FAIL: {err or f'exit {add.returncode}'}")
             return False
 
         up = subprocess.run(
@@ -112,7 +113,7 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0"):
         )
         if up.returncode != 0:
             err = (up.stderr or up.stdout or "").strip()
-            print(f"WiFi verify failed: {err or f'exit {up.returncode}'}")
+            print(f"FAIL: {err or f'exit {up.returncode}'}")
             subprocess.run(
                 ["nmcli", "connection", "delete", con_name],
                 capture_output=True, text=True,
@@ -140,8 +141,6 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0"):
             capture_output=True, text=True,
         )
         return False
-
-
 def encrypt_credentials(data):
     with open(KEY_FILE, "rb") as f:
         key = f.read()
@@ -153,24 +152,31 @@ def encrypt_credentials(data):
     cipher = Fernet(key)
     encrypted = cipher.encrypt(json_bytes)
     return encrypted
-def write_credentials_file(data, encrypt=False):
+def write_credentials_file(data, dont_encrypt=False):
     with open(DATA_FILE, "wb") as f:
-        if encrypt:
+        if dont_encrypt:
+            f.write(data) 
+            print(f"Saved: {DATA_FILE} (Not Encrypted)")
+        else:
             # Encrypted
             encrypted = encrypt_credentials(data)
             f.write(encrypted)
             print(f"Saved: {DATA_FILE} (Encrypted)")
-        else:
-            # Not Encrypted
-            f.write(data) 
-            print(f"Saved: {DATA_FILE} (Not Encrypted)")
 
     os.chmod(DATA_FILE, 0o600)
-def read_credentials_file(encrypt=False):
+def read_credentials_file(dont_encrypt=False):
     creds = {"ssid": "", "password": ""}
 
-    if encrypt:
-        # Encrypted
+    if dont_encrypt:
+        # Dont Encrypted
+        with open(DATA_FILE, "r") as f:
+            data_dict = json.load(f)
+            # normalize keys
+            creds["ssid"] = str(data_dict.get("ssid", ""))
+            creds["password"] = str(data_dict.get("password", ""))
+
+    else:
+    # Encrytpted
         with open(DATA_FILE, "rb") as data_file:
             data = data_file.read()
 
@@ -183,16 +189,11 @@ def read_credentials_file(encrypt=False):
 
         data_dict = json.loads(data.decode())
         creds["ssid"] = str(data_dict.get("ssid", ""))
-        creds["password"] = str(data_dict.get("password", ""))
-    else:
-        with open(DATA_FILE, "r") as f:
-            data_dict = json.load(f)
-            # normalize keys
-            creds["ssid"] = str(data_dict.get("ssid", ""))
-            creds["password"] = str(data_dict.get("password", ""))
-
+        creds["password"] = str(data_dict.get("password", "")) 
+        
+        
     return creds    
-def get_credentials(new_creds=False, encrypt=False):
+def get_credentials(new_creds=False, dont_encrypt=False):
    
     creds = {
         "ssid": "",
@@ -208,29 +209,42 @@ def get_credentials(new_creds=False, encrypt=False):
         while True:
             data = enter_credentials()
             if not data:
-                break
+                print("No WiFi network selected — aborting.")
+                sys.exit(1)
 
             parsed = json.loads(data.decode())
             if verify_wifi_credentials(parsed.get("ssid", ""), parsed.get("password", "")):
-                write_credentials_file(data, encrypt)
+                write_credentials_file(data, dont_encrypt)
                 creds = parsed
                 break
 
-            print("Credentials incorrect or connection failed — not saved.")
+            print("Credentials incorrect or WiFi not available — not saved.")
             retry = input("Try again? [Y/n]: ").strip().lower()
             if retry == "n":
-                break
+                print("Aborting: WiFi credentials not verified.")
+                sys.exit(1)
     
     else:
         # Read existing credentials
-        if os.path.exists(DATA_FILE):
-            print("Restore WiFi credentials")
-            creds = read_credentials_file(encrypt)
+        if not os.path.exists(DATA_FILE):
+            print("No WiFi credentials file found. Run with --newcreds.")
+            if getattr(args, "wifi", False):
+                sys.exit(1)
+            return creds["ssid"], creds["password"]
+
+        print("Restore WiFi credentials")
+        creds = read_credentials_file(dont_encrypt)
+
+        # When logging onto WiFi, require a live connection before continuing
+        if getattr(args, "wifi", False):
+            if not verify_wifi_credentials(creds.get("ssid", ""), creds.get("password", "")):
+                print("WiFi not available or credentials wrong — aborting.")
+                sys.exit(1)
    
     return creds['ssid'], creds['password']
 
 def main():
-    get_credentials(new_creds=args.newcreds, encrypt=args.encrypt)
+    get_credentials(new_creds=args.newcreds, dont_encrypt=args.dont_encrypt)
     
 
 

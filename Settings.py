@@ -14,9 +14,9 @@ parser.add_argument(
     help="Create new wifi credentials"
 )
 
-# --encrypt   : Encrypt wifi credentials
+# --dont_encrypt   : Encrypt wifi credentials
 parser.add_argument(
-    "--encrypt", 
+    "--dont_encrypt", 
     action="store_true",  # This makes it a boolean flag
     help="Encrypt wifi credentials"
 )
@@ -36,7 +36,7 @@ PRINT_DEBUG_GENERAL = False
 PRINT_DEBUG_IP_INFO = True
 PRINT_DEBUG_ERROR = True
 PRINT_DEBUG_WIFI = True
-PRINT_DEBUG_BT = True
+PRINT_DEBUG_BT = False
 PRINT_DEBUG_FIRESTORE = True
 PRINT_DEBUG_MONITOR = False
 PRINT_DEBUG_OPERATOR = True

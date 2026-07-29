@@ -184,7 +184,7 @@ FIRESTORE_WRITE_TIMEOUT = 15  # seconds, per attempt
 FIRESTORE_RETRY_BACKOFF = (1, 3, 9)  # delays between attempts; len = retries after first try
 FIRESTORE_OFFLINE_QUEUE_MAX = 5000  # cap so disk doesn't grow forever
 
-# Firestore / Monitor Listeners
+# Listeners
 def on_snapshot_operator(doc_snapshot, changes, read_time):
     global operators_version
     global new_operator_data_available
@@ -388,35 +388,6 @@ def checkWifiConnection():
 def printDebug(msg, enabled):
     if enabled:
         print(msg)
-def fire_sync_ip_address(ipLocal):
-    global settings 
-    
-    # Write IP Address to Firestore
-    # Compare to last local IP address (settings)
-    # Update firestore when IP changed
-    # Android will get IP from firestore
-    
-    read_settings()
-    printDebug(f"IP Address (settings): {settings['ipadr']}", cfg.PRINT_DEBUG_IP_INFO)
-    printDebug(f"IP Address (Unit): {ipLocal}", cfg.PRINT_DEBUG_IP_INFO)
-    
-    # Update Settings file
-    if(ipLocal != settings["ipadr"]):
-        printDebug(f"Local IP Address Changed: {ipLocal} -> {settings['ipadr']}", cfg.PRINT_DEBUG_IP_INFO)
-        settings["ipadr"] = ipLocal
-        write_local_settings()
-   
-    # Update Firestore
-    ipFire = fire_read_ip_adr(BT_NAME)
-
-    if(ipFire != ipLocal):
-        printDebug(f"Update IP Address Firestore: {ipFire} -> {ipLocal}", cfg.PRINT_DEBUG_IP_INFO)
-        fire_write_ip_adr(BT_NAME, IP_ADDRESS)
-        return True
-
-    # IP unchanged — still ensure MQTT creds are on the client doc if configured
-    fire_write_mqtt_creds(BT_NAME)
-    return False
 def get_local_ip_address(interface = INTERFACE_ETH):
     ip = "0.0.0.0"
     try:
@@ -455,7 +426,6 @@ def get_local_ip_address(interface = INTERFACE_ETH):
             match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", result.stdout)
             if match:
                 ip = match.group(1)
-                printDebug("Wifi Connected",cfg.PRINT_DEBUG_WIFI)
             else:
                 printDebug("No Wifi Connection",cfg.PRINT_DEBUG_WIFI)
         
@@ -481,57 +451,6 @@ def write_local_settings():
     with open(settingsFilePath, "w") as f:
         json.dump(settings, f, indent=4)   
         printDebug(f"Write Local Settings: {settings} to {settingsFilePath}", cfg.PRINT_DEBUG_GENERAL)
-def fire_write_ip_adr(bt_name="",ip_address=""):
-    
-    if bt_name == "":
-        printDebug("ERROR: fire_write_ip_adr(), Unknown Bluetooth Name, cannot write to Firestore.",cfg.PRINT_DEBUG_ERROR)
-        return
-    
-    if ip_address == "0.0.0.0":
-        printDebug("ERROR: fire_write_ip_adr(),\nNo IP Address found. Check Nerwork Connection.\nCannot write to Firestore.",cfg.PRINT_DEBUG_ERROR)
-        return
-    
-    try:
-        doc_ref = dbFire.collection(FIRE_COLLECT_CLIENTS).document(bt_name)
-        fields = {
-            FIRE_SET_IP_ADR: ip_address,
-            FIRE_SET_IP_LAST_CON: datetime.now().strftime("%d:%m:%Y %H:%M:%S"),
-        }
-        fields.update(MqttCredentials.get_firestore_mqtt_fields())
-        doc_ref.set(fields, merge=True)
-        
-        printDebug(f"Firestore Write: {bt_name}@{ip_address}",cfg.PRINT_DEBUG_FIRESTORE)
-    except Exception as e:
-        printDebug(f"ERROR: fire_write_ip_adr(), writing to Firestore: {e}",cfg.PRINT_DEBUG_ERROR)
-def fire_write_mqtt_creds(bt_name=""):
-    """Push mqttUser/mqttPw to clients/{bt_name} (merge). Same doc as IP."""
-    if bt_name == "":
-        printDebug("ERROR: fire_write_mqtt_creds(), Unknown Bluetooth Name.", cfg.PRINT_DEBUG_ERROR)
-        return False
-    if MqttCredentials.push_credentials_to_firestore(bt_name):
-        printDebug(f"Firestore MQTT creds: clients/{bt_name}", cfg.PRINT_DEBUG_FIRESTORE)
-        return True
-    return False
-def fire_read_ip_adr(bt_name=""):
-    if bt_name == "":
-        printDebug("ERROR: fire_read_ip_adr(), Unknown Bluetooth Name, cannot read from Firestore.",cfg.PRINT_DEBUG_ERROR)
-        return "0.0.0.0"
-     
-    try:
-        doc_ref = dbFire.collection(FIRE_COLLECT_CLIENTS).document(bt_name)
-        doc = doc_ref.get()
-
-        if doc.exists:
-            firestore_ip = doc.to_dict().get(FIRE_SET_IP_ADR, "0.0.0.0")
-            printDebug(f"Firestore IP: {firestore_ip}", cfg.PRINT_DEBUG_IP_INFO)
-            return firestore_ip
-        else:
-            printDebug(f"Firestore Failed to read document: {bt_name}",cfg.PRINT_DEBUG_ERROR)
-    
-    except Exception as e:
-        printDebug(f"ERROR: fire_read_ip_adr(), reading from Firestore: {e}",cfg.PRINT_DEBUG_ERROR) 
-
-    return "0.0.0.0"
 def _resolve_timestamp(epoch):
     """Returns a timezone-aware UTC datetime; falls back to now() on garbage/missing/out-of-range."""
     if epoch is None:
@@ -668,6 +587,31 @@ def _iot_queue_flush():
         if flushed:
             printDebug(f"Flushed {flushed} queued IoT writes; {len(remaining)} remain", cfg.PRINT_DEBUG_FIRESTORE)
         _iot_queue_save(remaining)
+def read_user_id_from_file():
+    global uid_data_file
+
+    user_id = ""
+    if os.path.exists(uid_data_file):
+        try:
+            with open(uid_data_file, 'rb') as f:
+                user_id = pickle.load(f)
+                printDebug(f"Read User ID from file: {user_id}",cfg.PRINT_DEBUG_GENERAL)
+    
+        except Exception as e:
+            printDebug(f"read_user_id_from_file(): {e}", cfg.PRINT_DEBUG_ERROR)
+            user_id = ""
+    return user_id
+def write_user_id_to_file(uid):
+    global uid_data_file
+
+    try:
+        with open(uid_data_file, 'wb') as f:
+            pickle.dump(uid, f)
+            printDebug(f"Saved User ID to file: {uid}",cfg.PRINT_DEBUG_GENERAL)
+    except Exception as e:
+        printDebug(f"ERROR: write_uid_to_file(), {e}",cfg.PRINT_DEBUG_ERROR)
+
+# firestore
 def fire_write_iot_data(payload, iot_device_id=None):
     """Synchronous Firestore write. Designed to be called via asyncio.to_thread()."""
     try:
@@ -688,7 +632,6 @@ def fire_write_iot_data(payload, iot_device_id=None):
         if mon_data:
             monDocId = monDocId or mon_data.mon_doc_id
             iot_name = mon_data.mon_name or payload.get(JSON_IOT_NAME, "")
-            #iot_device_id = mon_data.mon_device_id
             img_url = mon_data.image_url
             img_file = mon_data.image_filename
             iot_type = mon_data.mon_type
@@ -732,11 +675,8 @@ def fire_write_iot_data(payload, iot_device_id=None):
             FIRE_SETTING_MON_ID: monDocId,
             FIRE_WHEEL_OPERATOR_DOC_ID: operatorDocId,
             FIRE_WHEEL_SUPERVISOR_DOC_ID: supervisorDocId,
-            #FIRE_WHEEL_DISTANCE: distance,
             FIRE_WHEEL_LINES: lines,
             FIRE_WHEEL_TICKS: ticks,
-            #FIRE_WHEEL_OPERATOR: payload.get(JSON_WHEEL_OPERATOR, "none"),
-            #FIRE_WHEEL_SUPERVISOR: payload.get(JSON_WHEEL_SUPERVISOR, "none"),
             FIRE_TIMESTAMP: tStamp
         }
 
@@ -748,7 +688,7 @@ def fire_write_iot_data(payload, iot_device_id=None):
 
         if _commit_with_retry(userDocId, monDocId, doc, tStamp):
             printDebug(f"Firestore Write: {payload}",cfg.PRINT_DEBUG_FIRESTORE)
-            # Opportunistically flush anything that piled up during prior outages.
+            # flush anything that piled up during prior outages.
             _iot_queue_flush()
         else:
             # Capture-time tStamp is preserved so flushed writes keep their original time.
@@ -757,29 +697,98 @@ def fire_write_iot_data(payload, iot_device_id=None):
 
     except Exception as e:
         printDebug(f"ERROR: fire_write_iot_data: {type(e).__name__}: {e}", cfg.PRINT_DEBUG_ERROR)
-def read_user_id_from_file():
-    global uid_data_file
-
-    user_id = ""
-    if os.path.exists(uid_data_file):
-        try:
-            with open(uid_data_file, 'rb') as f:
-                user_id = pickle.load(f)
-                printDebug(f"Read User ID from file: {user_id}",cfg.PRINT_DEBUG_GENERAL)
+def fire_sync_ip_address(ipLocal):
+    global settings 
     
-        except Exception as e:
-            printDebug(f"read_user_id_from_file(): {e}", cfg.PRINT_DEBUG_ERROR)
-            user_id = ""
-    return user_id
-def write_user_id_to_file(uid):
-    global uid_data_file
+    # Write IP Address to Firestore
+    # Compare to last local IP address (settings)
+    # Update firestore when IP changed
+    # Android will get IP from firestore
 
+    ipLocal = (ipLocal or "").strip()
+    if not ipLocal or ipLocal == "0.0.0.0":
+        printDebug(
+            "Skip Firestore IP sync: no valid IP (0.0.0.0)",
+            cfg.PRINT_DEBUG_ERROR,
+        )
+        return False
+    
+    read_settings()
+    printDebug(f"IP Address (settings): {settings['ipadr']}", cfg.PRINT_DEBUG_IP_INFO)
+    printDebug(f"IP Address (Unit): {ipLocal}", cfg.PRINT_DEBUG_IP_INFO)
+    
+    # Update Settings file
+    if(ipLocal != settings["ipadr"]):
+        printDebug(f"Local IP Address Changed: {ipLocal} -> {settings['ipadr']}", cfg.PRINT_DEBUG_IP_INFO)
+        settings["ipadr"] = ipLocal
+        write_local_settings()
+   
+    # Update Firestore
+    ipFire = fire_read_ip_adr(BT_NAME)
+
+    if(ipFire != ipLocal):
+        printDebug(f"Update IP Address Firestore: {ipFire} -> {ipLocal}", cfg.PRINT_DEBUG_IP_INFO)
+        fire_write_ip_adr(BT_NAME, ipLocal)
+        return True
+
+    # IP unchanged — still ensure MQTT creds are on the client doc if configured
+    fire_write_mqtt_creds(BT_NAME)
+    return False
+def fire_write_ip_adr(bt_name="",ip_address=""):
+    
+    if bt_name == "":
+        printDebug("ERROR: fire_write_ip_adr(), Unknown Bluetooth Name, cannot write to Firestore.",cfg.PRINT_DEBUG_ERROR)
+        return
+    
+    ip_address = (ip_address or "").strip()
+    if not ip_address or ip_address == "0.0.0.0":
+        printDebug(
+            "ERROR: fire_write_ip_adr(), No valid IP Address. Cannot write 0.0.0.0 to Firestore.",
+            cfg.PRINT_DEBUG_ERROR,
+        )
+        return
+    
     try:
-        with open(uid_data_file, 'wb') as f:
-            pickle.dump(uid, f)
-            printDebug(f"Saved User ID to file: {uid}",cfg.PRINT_DEBUG_GENERAL)
+        doc_ref = dbFire.collection(FIRE_COLLECT_CLIENTS).document(bt_name)
+        fields = {
+            FIRE_SET_IP_ADR: ip_address,
+            FIRE_SET_IP_LAST_CON: datetime.now().strftime("%d:%m:%Y %H:%M:%S"),
+        }
+        fields.update(MqttCredentials.get_firestore_mqtt_fields())
+        doc_ref.set(fields, merge=True)
+        
+        printDebug(f"Firestore Write: {bt_name}@{ip_address}",cfg.PRINT_DEBUG_FIRESTORE)
     except Exception as e:
-        printDebug(f"ERROR: write_uid_to_file(), {e}",cfg.PRINT_DEBUG_ERROR)
+        printDebug(f"ERROR: fire_write_ip_adr(), writing to Firestore: {e}",cfg.PRINT_DEBUG_ERROR)
+def fire_write_mqtt_creds(bt_name=""):
+    """Push mqttUser/mqttPw to clients/{bt_name} (merge). Same doc as IP."""
+    if bt_name == "":
+        printDebug("ERROR: fire_write_mqtt_creds(), Unknown Bluetooth Name.", cfg.PRINT_DEBUG_ERROR)
+        return False
+    if MqttCredentials.push_credentials_to_firestore(bt_name):
+        printDebug(f"Firestore MQTT creds: clients/{bt_name}", cfg.PRINT_DEBUG_FIRESTORE)
+        return True
+    return False
+def fire_read_ip_adr(bt_name=""):
+    if bt_name == "":
+        printDebug("ERROR: fire_read_ip_adr(), Unknown Bluetooth Name, cannot read from Firestore.",cfg.PRINT_DEBUG_ERROR)
+        return "0.0.0.0"
+     
+    try:
+        doc_ref = dbFire.collection(FIRE_COLLECT_CLIENTS).document(bt_name)
+        doc = doc_ref.get()
+
+        if doc.exists:
+            firestore_ip = doc.to_dict().get(FIRE_SET_IP_ADR, "0.0.0.0")
+            printDebug(f"Firestore IP: {firestore_ip}", cfg.PRINT_DEBUG_IP_INFO)
+            return firestore_ip
+        else:
+            printDebug(f"Firestore Failed to read document: {bt_name}",cfg.PRINT_DEBUG_ERROR)
+    
+    except Exception as e:
+        printDebug(f"ERROR: fire_read_ip_adr(), reading from Firestore: {e}",cfg.PRINT_DEBUG_ERROR) 
+
+    return "0.0.0.0"
 
 #  Operators 
 def read_local_operators_ver_from_file():
@@ -1329,17 +1338,28 @@ async def main():
             # Connect LAN / Wifi
             case 1:
                 if(args.wifi):
-                   IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
-                   printDebug(f"WIFI IP Address: {IP_ADDRESS}", cfg.PRINT_DEBUG_WIFI)
+                    # Load + verify WiFi first; get_credentials exits if join fails
+                    WIFI_SSID, WIFI_PASSWORD = WifiCredentials.get_credentials(
+                        new_creds=args.newcreds,
+                        dont_encrypt=args.dont_encrypt,
+                    )
+                    IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
+                    printDebug(f"WIFI IP Address: {IP_ADDRESS}", cfg.PRINT_DEBUG_WIFI)
 
-                   wifiname = checkWifiConnection()
-                   if(wifiname):
-                       wifiConnected = True
+                    wifiname = checkWifiConnection()
+                    if not wifiname or not IP_ADDRESS or IP_ADDRESS == "0.0.0.0":
+                        printDebug(
+                            "WiFi not available — will not continue until connected",
+                            cfg.PRINT_DEBUG_ERROR,
+                        )
+                        await asyncio.sleep(5)
+                        # Stay on case 1
+                    else:
+                        casePtr += 1
                 else:
                    IP_ADDRESS = get_local_ip_address(INTERFACE_ETH)
                    printDebug(f"LAN IP Address: {IP_ADDRESS}",cfg.PRINT_DEBUG_WIFI)
-                    
-                casePtr+=1
+                   casePtr+=1
             
             # Save IP to Firestore + start cloud listeners (needs network)
             case 2:
@@ -1357,9 +1377,14 @@ async def main():
                 start_monitors_listener(user_id)
                 casePtr+=1
             
-            # Get Wifi Credenitials
+            # Get Wifi Credentials (for BLE share to IoTs; already done in case 1 if --wifi)
             case 3:
-                WIFI_SSID,WIFI_PASSWORD = WifiCredentials.get_credentials(new_creds=args.newcreds, encrypt=args.encrypt)
+                if not WIFI_SSID:
+                    WIFI_SSID, WIFI_PASSWORD = WifiCredentials.get_credentials(
+                        new_creds=args.newcreds,
+                        dont_encrypt=args.dont_encrypt,
+                    )
+                
                 printDebug(f"SSID: {WIFI_SSID}",cfg.PRINT_DEBUG_WIFI)
                 #print(f"Password: {WIFI_PASSWORD}") 
                 casePtr+=1
