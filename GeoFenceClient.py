@@ -11,6 +11,7 @@ from firebase_admin import credentials, firestore
 import datetime
 import asyncio
 from bleak import BleakScanner, BleakClient
+from bleak.exc import BleakDBusError
 import re
 import MqttService
 import MqttCredentials
@@ -1043,8 +1044,24 @@ async def bt_discover():
     printDebug("\nStarting Bluetooth Discovery... ",cfg.PRINT_DEBUG_GENERAL)
     
     while True:
-        # Discover
-        devices = await BleakScanner.discover(timeout=3.0)
+        # Discover — BlueZ often returns InProgress if a prior scan/connect
+        # has not fully released the adapter; retry instead of crashing.
+        try:
+            devices = await BleakScanner.discover(timeout=3.0)
+        except BleakDBusError as e:
+            err = str(e)
+            if "InProgress" in err:
+                printDebug("BLE scan busy (InProgress) — retrying...", cfg.PRINT_DEBUG_BT)
+                await asyncio.sleep(3)
+                continue
+            printDebug(f"ERROR: BLE scan DBus: {e}", cfg.PRINT_DEBUG_ERROR)
+            await asyncio.sleep(5)
+            continue
+        except Exception as e:
+            printDebug(f"ERROR: BLE scan: {e}", cfg.PRINT_DEBUG_ERROR)
+            await asyncio.sleep(5)
+            continue
+
         targets = [
             d for d in devices
             if d.name and d.name.startswith(TARGET_PREFIX)
@@ -1084,6 +1101,9 @@ async def bt_discover():
                 await bt_connect(device)
                 await bt_update_connection_status(device)
                 # Credentials are sent only on BLE PAIRING notify (see bt_on_iot_notify)
+
+            # Let BlueZ finish any connect-side discovery before next scan
+            await asyncio.sleep(1)
 
         await asyncio.sleep(10)   # yield 10s
 async def bt_connect(device):
