@@ -1,48 +1,164 @@
 # Debug
 import argparse
+import json
 import os
 import threading
 from typing import List
-import argparse
+
+# Config file for boot/service options (CLI flags override when passed)
+CONFIG_FILE = os.path.expanduser("~/Secure/geofence.conf")
+CONFIG_DEFAULTS = {
+    "wifi": False,
+    "verbose": False,
+    "mqtt": False,
+    "newcreds": False,
+}
+
+
+def load_config(path: str = CONFIG_FILE) -> dict:
+    """Load boolean options from geofence.conf; missing file → defaults."""
+    cfg = dict(CONFIG_DEFAULTS)
+    if not os.path.exists(path):
+        return cfg
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for key in CONFIG_DEFAULTS:
+                if key in data:
+                    cfg[key] = bool(data[key])
+    except Exception as e:
+        # Flags not defined yet; reported after PRINT_DEBUG_* below
+        cfg["_load_error"] = f"WARNING: could not read {path}: {e}"
+    return cfg
+
+
+def update_config(updates: dict, path: str = None) -> bool:
+    """Merge keys into geofence.conf and write it back. Returns True on success."""
+    path = path or CONFIG_FILE
+    cfg = load_config(path)
+    cfg.pop("_load_error", None)
+    for key, value in updates.items():
+        if key in CONFIG_DEFAULTS:
+            cfg[key] = bool(value)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({k: cfg[k] for k in CONFIG_DEFAULTS}, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return True
+    except Exception as e:
+        printDebug(f"WARNING: could not update {path}: {e}", PRINT_DEBUG_ERROR)
+        return False
+
+
+def clear_newcreds(path: str = None) -> bool:
+    """One-shot: turn newcreds off in config after credentials were created."""
+    ok = update_config({"newcreds": False}, path=path or getattr(args, "config", CONFIG_FILE))
+    args.newcreds = False
+    if ok:
+        printDebug("Cleared newcreds in config (one-time flag)", PRINT_DEBUG_GENERAL)
+    return ok
+
 
 # ----- Create Arguments ------
 # --newcreds : Create new wifi credentials
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument(
-    "--newcreds", 
-    action="store_true",  # This makes it a boolean flag
-    help="Create new wifi credentials"
-)
-
-# --dont_encrypt   : Encrypt wifi credentials
-parser.add_argument(
-    "--dont_encrypt", 
-    action="store_true",  # This makes it a boolean flag
-    help="Encrypt wifi credentials"
+    "--newcreds",
+    action="store_true",
+    help="Create new wifi credentials (one-shot; clears newcreds in geofence.conf after success)",
 )
 
 # --wifi : ignore Ethernet Connection, Use
-#parser = argparse.ArgumentParser(description="GeoFence Client")
 parser.add_argument(
-    "--wifi", 
-    action="store_true",  # This makes it a boolean flag
-    help="Ignore Ethernet LAN, use Wifi connection"
+    "--wifi",
+    action="store_true",
+    help="Ignore Ethernet LAN, use Wifi connection",
 )
 
-args = parser.parse_args()
+# --verbose : enable all debug print flags
+parser.add_argument(
+    "--verbose",
+    action="store_true",
+    help="Enable all PRINT_DEBUG flags",
+)
+
+# --mqtt : print MQTT RX/TX traffic
+parser.add_argument(
+    "--mqtt",
+    action="store_true",
+    help="Enable PRINT_MQTT_COMMS (MQTT RX/TX logging)",
+)
+
+# --config : optional path to geofence.conf
+parser.add_argument(
+    "--config",
+    default=CONFIG_FILE,
+    help=f"Path to config file (default: {CONFIG_FILE})",
+)
+
+_cli_args, _ = parser.parse_known_args()
+_file_cfg = load_config(_cli_args.config)
+
+# Config sets defaults for service/boot; CLI --flags still force True when passed
+class _Args:
+    newcreds = bool(_cli_args.newcreds or _file_cfg["newcreds"])
+    wifi = bool(_cli_args.wifi or _file_cfg["wifi"])
+    verbose = bool(_cli_args.verbose or _file_cfg["verbose"])
+    mqtt = bool(_cli_args.mqtt or _file_cfg["mqtt"])
+    config = _cli_args.config
 
 
-PRINT_DEBUG_GENERAL = False
-PRINT_DEBUG_IP_INFO = True
+args = _Args()
+
+
 PRINT_DEBUG_ERROR = True
-PRINT_DEBUG_WIFI = True
+PRINT_DEBUG_GENERAL = False
+PRINT_DEBUG_IP_INFO = False
+PRINT_DEBUG_WIFI = False
 PRINT_DEBUG_BT = False
-PRINT_DEBUG_FIRESTORE = True
+PRINT_DEBUG_FIRESTORE = False
 PRINT_DEBUG_MONITOR = False
-PRINT_DEBUG_OPERATOR = True
-PRINT_MQTT_COMMS = True
+PRINT_DEBUG_OPERATOR = False
+PRINT_MQTT_COMMS = False
 PRINT_DEBUG_MQTT = False
 PRINT_DEBUG_MQTT_CREDS = False
+
+if args.mqtt:
+    PRINT_MQTT_COMMS = True
+
+if args.verbose:
+    PRINT_DEBUG_GENERAL = True
+    PRINT_DEBUG_IP_INFO = True
+    PRINT_DEBUG_ERROR = True
+    PRINT_DEBUG_WIFI = True
+    PRINT_DEBUG_BT = True
+    PRINT_DEBUG_FIRESTORE = True
+    PRINT_DEBUG_MONITOR = True
+    PRINT_DEBUG_OPERATOR = True
+    PRINT_MQTT_COMMS = True
+    PRINT_DEBUG_MQTT = True
+    PRINT_DEBUG_MQTT_CREDS = True
+
+
+def printDebug(msg, enabled):
+    if not enabled:
+        return
+    print(msg)
+    # journald omits truly empty lines; a space keeps a visible blank when verbose
+    if args.verbose:
+        print(" ")
+
+
+if _file_cfg.get("_load_error"):
+    printDebug(_file_cfg["_load_error"], PRINT_DEBUG_ERROR)
 
 # BLE Commands
 CMD_BLE_PAIRING = "PAIRING"  # IoT in pair mode — base may send WiFi creds

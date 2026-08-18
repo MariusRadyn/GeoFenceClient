@@ -5,12 +5,9 @@ import sys
 from getpass import getpass
 from cryptography.fernet import Fernet
 
+import Settings as cfg
 from Settings import args
 
-
-# Include wifi_parser arguments
-#for action in parser._actions:
-#    parser._add_action(action)
 
 # Variables
 SECURE_DIR = os.path.expanduser("~/Secure")
@@ -18,33 +15,37 @@ KEY_FILE = f"{SECURE_DIR}/key.key"
 DATA_FILE = f"{SECURE_DIR}/wificredentials.enc"
 
 
+def printDebug(msg, enabled):
+    cfg.printDebug(msg, enabled)
+
+
 def create_secure_dir():
     if not os.path.exists(SECURE_DIR):
-        print(f"Creating secure directory: {SECURE_DIR}")
+        printDebug(f"Creating secure directory: {SECURE_DIR}", cfg.PRINT_DEBUG_GENERAL)
         os.makedirs(SECURE_DIR, exist_ok=True)
         os.chmod(SECURE_DIR, 0o700)
 def generate_key():
     if not os.path.exists(KEY_FILE):
-        print("Generating encryption key...")
+        printDebug("Generating encryption key...", cfg.PRINT_DEBUG_GENERAL)
         key = Fernet.generate_key()
         with open(KEY_FILE, "wb") as f:
             f.write(key)
         os.chmod(KEY_FILE, 0o600)
     else:
-        print("Encryption key already exists.")
+        printDebug("Encryption key already exists.", cfg.PRINT_DEBUG_GENERAL)
 def select_wifi():
-    # Get list of WiFi connections from NetworkManager
-    print("Scanning saved WiFi connections...")
+    # Interactive --newcreds UI: always show (not gated by debug flags)
+    printDebug("Scanning saved WiFi connections...", True)
     result = subprocess.run(["nmcli", "-t", "-f", "SSID,SIGNAL", "dev", "wifi","list"],
                             capture_output=True, text=True)
 
     lines = [l for l in result.stdout.splitlines() if l.strip() != ""]
 
     if not lines:
-        print("No Wi-Fi networks found.")
+        printDebug("No Wi-Fi networks found.", cfg.PRINT_DEBUG_ERROR)
         return None
-    
-    print("\nSelect WiFi network:")
+
+    printDebug("\nSelect WiFi network:", True)
     ssids = []
     index = 0
 
@@ -52,7 +53,7 @@ def select_wifi():
         ssid = line.split(":")[0]
         if ssid and ssid not in ssids:
             ssids.append(ssid)
-            print(f"[{index}] {ssid}")
+            printDebug(f"[{index}] {ssid}", True)
             index += 1
 
     index = int(input("Enter number: "))
@@ -67,14 +68,16 @@ def enter_credentials():
     return data
 
 
-def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0"):
+def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0", quiet=False):
     """Try joining the network with nmcli; return True only if connect succeeds."""
     ssid = (ssid or "").strip()
     if not ssid:
-        print("WiFi verify failed: empty SSID")
+        if not quiet:
+            printDebug("WiFi verify failed: empty SSID", cfg.PRINT_DEBUG_ERROR)
         return False
 
-    print(f"Verifying WiFi credentials for '{ssid}'...")
+    if not quiet:
+        printDebug(f"Verifying WiFi credentials for '{ssid}'...", cfg.PRINT_DEBUG_GENERAL)
     con_name = f"geofence-verify-{ssid}"[:100]
 
     # Newer NetworkManager rejects `device wifi connect ... password` with
@@ -102,7 +105,8 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0"):
         add = subprocess.run(add_cmd, capture_output=True, text=True, timeout=15)
         if add.returncode != 0:
             err = (add.stderr or add.stdout or "").strip()
-            print(f"FAIL: {err or f'exit {add.returncode}'}")
+            if not quiet:
+                printDebug(f"FAIL: {err or f'exit {add.returncode}'}", cfg.PRINT_DEBUG_ERROR)
             return False
 
         up = subprocess.run(
@@ -113,7 +117,8 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0"):
         )
         if up.returncode != 0:
             err = (up.stderr or up.stdout or "").strip()
-            print(f"FAIL: {err or f'exit {up.returncode}'}")
+            if not quiet:
+                printDebug(f"FAIL: {err or f'exit {up.returncode}'}", cfg.PRINT_DEBUG_ERROR)
             subprocess.run(
                 ["nmcli", "connection", "delete", con_name],
                 capture_output=True, text=True,
@@ -125,17 +130,20 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0"):
             ["nmcli", "connection", "modify", con_name, "connection.id", ssid],
             capture_output=True, text=True, timeout=10,
         )
-        print(f"WiFi OK: connected to '{ssid}'")
+        if not quiet:
+            printDebug(f"WiFi OK: connected to '{ssid}'", cfg.PRINT_DEBUG_GENERAL)
         return True
     except subprocess.TimeoutExpired:
-        print("WiFi verify failed: timed out")
+        if not quiet:
+            printDebug("WiFi verify failed: timed out", cfg.PRINT_DEBUG_ERROR)
         subprocess.run(
             ["nmcli", "connection", "delete", con_name],
             capture_output=True, text=True,
         )
         return False
     except Exception as e:
-        print(f"WiFi verify error: {e}")
+        if not quiet:
+            printDebug(f"WiFi verify error: {e}", cfg.PRINT_DEBUG_ERROR)
         subprocess.run(
             ["nmcli", "connection", "delete", con_name],
             capture_output=True, text=True,
@@ -148,53 +156,37 @@ def encrypt_credentials(data):
     # JSON data must be in dict format for encryption
     data = json.loads(data)   # convert string → dict
     json_bytes = json.dumps(data, indent=4).encode('utf-8')
-    
+
     cipher = Fernet(key)
     encrypted = cipher.encrypt(json_bytes)
     return encrypted
-def write_credentials_file(data, dont_encrypt=False):
+def write_credentials_file(data):
     with open(DATA_FILE, "wb") as f:
-        if dont_encrypt:
-            f.write(data) 
-            print(f"Saved: {DATA_FILE} (Not Encrypted)")
-        else:
-            # Encrypted
-            encrypted = encrypt_credentials(data)
-            f.write(encrypted)
-            print(f"Saved: {DATA_FILE} (Encrypted)")
+        encrypted = encrypt_credentials(data)
+        f.write(encrypted)
+        printDebug(f"Saved: {DATA_FILE} (Encrypted)", cfg.PRINT_DEBUG_GENERAL)
 
     os.chmod(DATA_FILE, 0o600)
-def read_credentials_file(dont_encrypt=False):
+def read_credentials_file():
     creds = {"ssid": "", "password": ""}
 
-    if dont_encrypt:
-        # Dont Encrypted
-        with open(DATA_FILE, "r") as f:
-            data_dict = json.load(f)
-            # normalize keys
-            creds["ssid"] = str(data_dict.get("ssid", ""))
-            creds["password"] = str(data_dict.get("password", ""))
+    with open(DATA_FILE, "rb") as data_file:
+        data = data_file.read()
 
-    else:
-    # Encrytpted
-        with open(DATA_FILE, "rb") as data_file:
-            data = data_file.read()
+    with open(KEY_FILE, "rb") as key_file:
+        key = key_file.read()
 
-        with open(KEY_FILE, "rb") as key_file:
-            key = key_file.read()
+    cipher = Fernet(key)
+    data = cipher.decrypt(data)
+    printDebug("Decrypted", cfg.PRINT_DEBUG_GENERAL)
 
-        cipher = Fernet(key)   
-        data = cipher.decrypt(data)
-        print("Decrypted")
+    data_dict = json.loads(data.decode())
+    creds["ssid"] = str(data_dict.get("ssid", ""))
+    creds["password"] = str(data_dict.get("password", ""))
 
-        data_dict = json.loads(data.decode())
-        creds["ssid"] = str(data_dict.get("ssid", ""))
-        creds["password"] = str(data_dict.get("password", "")) 
-        
-        
-    return creds    
-def get_credentials(new_creds=False, dont_encrypt=False):
-   
+    return creds
+def get_credentials(new_creds=False):
+
     creds = {
         "ssid": "",
         "password": ""
@@ -203,49 +195,52 @@ def get_credentials(new_creds=False, dont_encrypt=False):
 
     if new_creds:
         # Create new credentials — verify with nmcli before saving
-        print("Get new credentials")
+        printDebug("Get new credentials", cfg.PRINT_DEBUG_GENERAL)
         generate_key()
 
         while True:
             data = enter_credentials()
             if not data:
-                print("No WiFi network selected — aborting.")
+                printDebug("No WiFi network selected — aborting.", cfg.PRINT_DEBUG_ERROR)
                 sys.exit(1)
 
             parsed = json.loads(data.decode())
             if verify_wifi_credentials(parsed.get("ssid", ""), parsed.get("password", "")):
-                write_credentials_file(data, dont_encrypt)
+                write_credentials_file(data)
                 creds = parsed
+                # One-shot: do not prompt again on next boot/service start
+                cfg.clear_newcreds()
                 break
 
-            print("Credentials incorrect or WiFi not available — not saved.")
+            printDebug("Credentials incorrect or WiFi not available — not saved.", cfg.PRINT_DEBUG_ERROR)
             retry = input("Try again? [Y/n]: ").strip().lower()
             if retry == "n":
-                print("Aborting: WiFi credentials not verified.")
+                printDebug("Aborting: WiFi credentials not verified.", cfg.PRINT_DEBUG_ERROR)
                 sys.exit(1)
-    
+
     else:
         # Read existing credentials
         if not os.path.exists(DATA_FILE):
-            print("No WiFi credentials file found. Run with --newcreds.")
+            printDebug("No WiFi credentials file found. Run with --newcreds.", cfg.PRINT_DEBUG_ERROR)
             if getattr(args, "wifi", False):
                 sys.exit(1)
             return creds["ssid"], creds["password"]
 
-        print("Restore WiFi credentials")
-        creds = read_credentials_file(dont_encrypt)
+        printDebug("Restore WiFi credentials", cfg.PRINT_DEBUG_GENERAL)
+        creds = read_credentials_file()
 
         # When logging onto WiFi, require a live connection before continuing
         if getattr(args, "wifi", False):
             if not verify_wifi_credentials(creds.get("ssid", ""), creds.get("password", "")):
-                print("WiFi not available or credentials wrong — aborting.")
+                printDebug("WiFi not available or credentials wrong — aborting.", cfg.PRINT_DEBUG_ERROR)
                 sys.exit(1)
-   
+
+    printDebug("WiFi Started.", True)
     return creds['ssid'], creds['password']
 
 def main():
-    get_credentials(new_creds=args.newcreds, dont_encrypt=args.dont_encrypt)
-    
+    get_credentials(new_creds=args.newcreds)
+
 
 
 if __name__ == "__main__":

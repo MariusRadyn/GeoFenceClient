@@ -49,6 +49,7 @@ MQTT_CMD_CONNECT_MONITOR = "#CONNECT_MONITOR"
 MQTT_CMD_CONNECT_BASE = "#CONNECT_BASE"
 MQTT_CMD_DISCONNECT_MONITOR = "#DISCONNECT_MONITOR"
 MQTT_CMD_PING = "#PING"
+MQTT_CMD_FIND = "#FIND"
 MQTT_CMD_SETTINGS = "#REQ_SETTINGS"
 MQTT_CMD_ACK = "#ACK"
 MQTT_CMD_DEVICE_ID = "#DEVICE_ID"
@@ -112,17 +113,18 @@ class MqttServer:
     # Commands
     # -----------------------------
     async def connectMqtt(self):
-        print(f"MQTT Connecting {self.broker_ip}:{self.port} ... ")
+        self.printDebug(f"MQTT Connecting {self.broker_ip}:{self.port} ... ", cfg.PRINT_DEBUG_GENERAL)
         if not self.mqtt_username or not self.mqtt_password:
             try:
                 import MqttCredentials
                 cred_path = MqttCredentials.MQTT_CREDS_FILE
             except Exception:
                 cred_path = "~/Secure/mqtt_credentials.json"
-            print(
+            self.printDebug(
                 f"ERROR: MQTT credentials missing for user '{self.mqtt_username or '?'}'. "
                 f"Expected file: {cred_path}\n"
-                "Run as your Pi user (not sudo): python3 MqttCredentials.py --setup"
+                "Run as your Pi user (not sudo): python3 MqttCredentials.py --setup",
+                cfg.PRINT_DEBUG_ERROR,
             )
             return False
 
@@ -152,8 +154,7 @@ class MqttServer:
     def loop(self):
         self.client.loop()
     def printDebug(self, msg, enabled):
-        if enabled:
-            print('\n' + msg)
+        cfg.printDebug(msg, enabled)
     def _iot_mqtt_payload(self) -> dict:
         return MqttCredentials.get_mqtt_payload_for_role("iot")
     def _android_mqtt_payload(self) -> dict:
@@ -165,7 +166,7 @@ class MqttServer:
         # and is unsafe when multiple IoTs sync at once after #NEW_DATA_AVAILABLE.
         device_id = (to_device_id or SYNC_REQUESTED_FROM_DEVICE_ID or "").strip()
         if not device_id:
-            print(f"No sync requested. Ignoring sync.")
+            self.printDebug("No sync requested. Ignoring sync.", cfg.PRINT_DEBUG_GENERAL)
             return
                    
         response_topic = f"{MQTT_TOPIC_TO_IOT}/{device_id}"
@@ -211,11 +212,12 @@ class MqttServer:
 
         failed = getattr(reason_code, "is_failure", None)
         if failed is True:
-            print(
+            self.printDebug(
                 f"ERROR: MQTT connect failed: {reason_code} "
                 f"(user={self.mqtt_username!r}). "
                 "Check ~/Secure/mqtt_credentials.json matches /etc/mosquitto/passwd — "
-                "re-run: python3 MqttCredentials.py --setup"
+                "re-run: python3 MqttCredentials.py --setup",
+                cfg.PRINT_DEBUG_ERROR,
             )
             return
 
@@ -363,6 +365,25 @@ class MqttServer:
         
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
+
+                # Find Monitor (locate: beep + LEDs) — forward to that IoT
+                if(command == MQTT_CMD_FIND):
+                    if not to_id:
+                        self.printDebug("FIND missing to_id", cfg.PRINT_DEBUG_ERROR)
+                    else:
+                        response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
+                        out_payload = payload if isinstance(payload, dict) else {}
+
+                        txPayload = {
+                            MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                            MQTT_SETTING_TO_DEVICE_ID: to_id,
+                            MQTT_SETTING_TOPIC: response_topic,
+                            MQTT_SETTING_PAYLOAD: out_payload,
+                            MQTT_SETTING_CMD: MQTT_CMD_FIND
+                        }
+
+                        client.publish(response_topic, json.dumps(txPayload))
+                        self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # PING (Check if Base is there)
                 if(command == MQTT_CMD_PING):         
@@ -574,6 +595,20 @@ class MqttServer:
                         MQTT_SETTING_CMD:MQTT_CMD_DISCONNECT_MONITOR
                     }
         
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
+
+                # Find (IOT to Android)
+                if(command == MQTT_CMD_FIND):
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
+
+                    txPayload = {
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: payload if isinstance(payload, dict) else "",
+                        MQTT_SETTING_CMD: MQTT_CMD_FIND
+                    }
+
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 

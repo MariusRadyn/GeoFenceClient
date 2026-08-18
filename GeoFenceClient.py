@@ -32,8 +32,11 @@ from typing import List, Optional
 
 # Create Arguments
 # --newcreds : Create new wifi credentials
-# --encrypt   : Encrypt wifi credentials
 # --wifi : ignore Ethernet Connection, Use
+# --verbose : enable all PRINT_DEBUG flags
+# --mqtt : enable MQTT RX/TX logging (PRINT_MQTT_COMMS)
+# --config : path to geofence.conf (default ~/Secure/geofence.conf)
+# Boot/service options also come from ~/Secure/geofence.conf
 # parser = argparse.ArgumentParser(description="GeoFence Client")
 # parser.add_argument(
 #     "--wifi", 
@@ -60,6 +63,9 @@ IP_ADDRESS = ''
 #WiFi
 WIFI_SSID = ""
 WIFI_PASSWORD = ""
+WIFI_WATCHDOG_INTERVAL_S = 15  # idle check when --wifi / config wifi=true
+_wifi_watchdog_next = 0.0
+_wifi_was_down = False
 
 # Bluetooth
 BT_NAME = ""
@@ -368,27 +374,97 @@ def get_monitor_data_by_device_id(iot_device_id: str) -> Optional[MONITOR_DATA]:
         if mon.mon_device_id == device_id:
             return mon
     return None
-def checkWifiConnection():
+def checkWifiConnection(quiet: bool = False):
     try:
         # Get IP address for the specified interface
         result = subprocess.check_output(
             ["iwgetid", "wlan0", "--raw"],
             stderr=subprocess.DEVNULL
         )
-        
-        ssid = result.decode().strip()  
+
+        ssid = result.decode().strip()
         if ssid:
-            printDebug(f"WIFI Connected: {ssid}", cfg.PRINT_DEBUG_WIFI)
+            if not quiet:
+                printDebug(f"WIFI Connected: {ssid}", cfg.PRINT_DEBUG_WIFI)
         else:
-            printDebug("No WIFI Connection", cfg.PRINT_DEBUG_WIFI)
-        
+            if not quiet:
+                printDebug("No WIFI Connection", cfg.PRINT_DEBUG_WIFI)
+
         return ssid
-    except subprocess.CalledProcessError as e:
-        printDebug(f"Error: checkWifiConnection {e}",cfg.PRINT_DEBUG_ERROR)
+    except subprocess.CalledProcessError:
+        # Not associated / no link — normal when down; don't spam ERROR every poll
+        if not quiet:
+            printDebug("No WIFI Connection", cfg.PRINT_DEBUG_WIFI)
         return None
+
+
+def wifi_link_ok() -> bool:
+    """True if wlan0 has an SSID and a non-zero IPv4 address."""
+    ssid = checkWifiConnection(quiet=True)
+    ip = get_local_ip_address(INTERFACE_WIFI)
+    return bool(ssid) and bool(ip) and ip != "0.0.0.0"
+
+
+async def ensure_wifi_connected() -> bool:
+    """
+    Idle WiFi watchdog: if link is down, try nmcli reconnect with saved creds.
+    Returns True when WiFi looks healthy.
+    Logs only on state change (down once, restored once) — not every retry.
+    """
+    global IP_ADDRESS, WIFI_SSID, WIFI_PASSWORD, _wifi_was_down
+
+    if not args.wifi:
+        return True
+
+    if wifi_link_ok():
+        IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
+        if _wifi_was_down:
+            printDebug(f"WiFi restored: {IP_ADDRESS}", True)
+            try:
+                fire_sync_ip_address(IP_ADDRESS)
+            except Exception as e:
+                printDebug(f"WiFi restore: fire_sync_ip_address failed: {e}", cfg.PRINT_DEBUG_ERROR)
+            _wifi_was_down = False
+        return True
+
+    first_down = not _wifi_was_down
+    _wifi_was_down = True
+    if first_down:
+        printDebug("WiFi down — attempting reconnect ...", cfg.PRINT_DEBUG_ERROR)
+
+    if not WIFI_SSID:
+        WIFI_SSID, WIFI_PASSWORD = WifiCredentials.get_credentials(new_creds=False)
+
+    ok = await asyncio.to_thread(
+        WifiCredentials.verify_wifi_credentials,
+        WIFI_SSID,
+        WIFI_PASSWORD,
+        20,
+        "wlan0",
+        not first_down,  # quiet after first notice
+    )
+    if not ok:
+        if first_down:
+            printDebug("WiFi reconnect failed — will retry quietly", cfg.PRINT_DEBUG_ERROR)
+        return False
+
+    IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
+    if not wifi_link_ok():
+        if first_down:
+            printDebug("WiFi reconnect: joined but no IP yet — will retry quietly", cfg.PRINT_DEBUG_ERROR)
+        return False
+
+    printDebug(f"WiFi reconnected: {IP_ADDRESS}", True)
+    try:
+        fire_sync_ip_address(IP_ADDRESS)
+    except Exception as e:
+        printDebug(f"WiFi reconnect: fire_sync_ip_address failed: {e}", cfg.PRINT_DEBUG_ERROR)
+    _wifi_was_down = False
+    return True
+
+
 def printDebug(msg, enabled):
-    if enabled:
-        print(msg)
+    cfg.printDebug(msg, enabled)
 def get_local_ip_address(interface = INTERFACE_ETH):
     ip = "0.0.0.0"
     try:
@@ -1350,6 +1426,8 @@ async def main():
 
             # Get Unit Name
             case 0:
+                printDebug(f"Starting Service ...", True)
+
                 BT_NAME = bt_get_name()
                 printDebug(f"\nBLE ID: {BT_NAME}",cfg.PRINT_DEBUG_BT)
                 _load_paired_iots()
@@ -1361,11 +1439,9 @@ async def main():
                     # Load + verify WiFi first; get_credentials exits if join fails
                     WIFI_SSID, WIFI_PASSWORD = WifiCredentials.get_credentials(
                         new_creds=args.newcreds,
-                        dont_encrypt=args.dont_encrypt,
                     )
                     IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
-                    printDebug(f"WIFI IP Address: {IP_ADDRESS}", cfg.PRINT_DEBUG_WIFI)
-
+                   
                     wifiname = checkWifiConnection()
                     if not wifiname or not IP_ADDRESS or IP_ADDRESS == "0.0.0.0":
                         printDebug(
@@ -1376,9 +1452,10 @@ async def main():
                         # Stay on case 1
                     else:
                         casePtr += 1
+                        printDebug(f"Service Running on WIFI: {IP_ADDRESS}", True)
                 else:
+                   printDebug(f"Service Running on LAN: {IP_ADDRESS}", True)
                    IP_ADDRESS = get_local_ip_address(INTERFACE_ETH)
-                   printDebug(f"LAN IP Address: {IP_ADDRESS}",cfg.PRINT_DEBUG_WIFI)
                    casePtr+=1
             
             # Save IP to Firestore + start cloud listeners (needs network)
@@ -1388,11 +1465,11 @@ async def main():
                     if(fire_sync_ip_address(IP_ADDRESS)):
                         printDebug(f"Update Firestore IP: {IP_ADDRESS}",cfg.PRINT_DEBUG_GENERAL)
                 except Exception as e:
-                    printDebug(f"case 2: fire_sync_ip_address failed: {e}", cfg.PRINT_DEBUG_ERROR)
+                    printDebug(f"fire_sync_ip_address failed: {e}", cfg.PRINT_DEBUG_ERROR)
 
                 # Start listeners after network is up (UID from prior CONNECT_BASE, if any)
                 user_id = read_user_id_from_file()
-                printDebug(f"case 2: calling start_monitors_listener with user_id={user_id!r}", cfg.PRINT_DEBUG_GENERAL)
+                printDebug(f"calling start_monitors_listener with user_id={user_id!r}", cfg.PRINT_DEBUG_GENERAL)
                 start_operators_version_listener(user_id)
                 start_monitors_listener(user_id)
                 casePtr+=1
@@ -1402,9 +1479,8 @@ async def main():
                 if not WIFI_SSID:
                     WIFI_SSID, WIFI_PASSWORD = WifiCredentials.get_credentials(
                         new_creds=args.newcreds,
-                        dont_encrypt=args.dont_encrypt,
                     )
-                
+
                 printDebug(f"SSID: {WIFI_SSID}",cfg.PRINT_DEBUG_WIFI)
                 #print(f"Password: {WIFI_PASSWORD}") 
                 casePtr+=1
@@ -1430,7 +1506,15 @@ async def main():
             
             # Idle
             case 6:
+                global _wifi_watchdog_next
                 await asyncio.sleep(0.1)
+
+                # Periodic WiFi watchdog (wifi mode only)
+                if args.wifi:
+                    now = time.monotonic()
+                    if now >= _wifi_watchdog_next:
+                        _wifi_watchdog_next = now + WIFI_WATCHDOG_INTERVAL_S
+                        await ensure_wifi_connected()
 
                 # New Operator Data Available
                 if new_operator_data_available:
@@ -1470,16 +1554,17 @@ async def main():
                         elif command == MqttService.MQTT_CMD_CONNECT_BASE:
                             iot_type = payload.get(MqttService.MQTT_SETTING_IOT_TYPE, "")
                             uid = _resolve_uid_from_payload(payload)
-                            print(f"CONNECT_BASE: iotType={iot_type!r} uid={uid!r} (len={len(uid)})")
+                            printDebug(f"CONNECT_BASE: iotType={iot_type!r} uid={uid!r} (len={len(uid)})", cfg.PRINT_DEBUG_GENERAL)
 
                             if len(uid) >= 28:
                                 write_user_id_to_file(uid)
                                 start_operators_version_listener(uid)
                                 start_monitors_listener(uid)
                             else:
-                                print(
+                                printDebug(
                                     "CONNECT_BASE: no valid userId/userDocId in payload — "
-                                    "monitors listener not started"
+                                    "monitors listener not started",
+                                    cfg.PRINT_DEBUG_ERROR,
                                 )
                      
                         # Sync IOT

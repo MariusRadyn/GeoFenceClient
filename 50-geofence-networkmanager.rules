@@ -1,0 +1,10 @@
+// Allow geoserver to manage NetworkManager (WiFi connect/verify for GeoFence).
+// Installed to: /etc/polkit-1/rules.d/50-geofence-networkmanager.rules
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "geoserver") {
+        return;
+    }
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
+        return polkit.Result.YES;
+    }
+});

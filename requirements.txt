@@ -1,0 +1,4 @@
+firebase-admin
+bleak
+paho-mqtt
+cryptography

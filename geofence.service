@@ -1,0 +1,21 @@
+[Unit]
+Description=GeoFence Base Client
+After=network-online.target bluetooth.service mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=geoserver
+Group=geoserver
+WorkingDirectory=/home/geoserver/GeoFenceBase
+Environment=HOME=/home/geoserver
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/geoserver/venv312/bin/python /home/geoserver/GeoFenceBase/GeoFenceClient.py
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
