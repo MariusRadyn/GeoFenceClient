@@ -179,9 +179,17 @@ else
     echo "Place app files in $APP_DIR and re-run."
     exit 1
 fi
-echo "Optional: restrict LAN access with:"
-echo "  sudo ufw allow from 192.168.0.0/16 to any port 1883"
-echo "  sudo ufw allow from 192.168.0.0/16 to any port 9001 comment 'MQTT WebSockets'"
+# Open MQTT ports in UFW (if ufw is installed). These allow any source IP,
+# so LAN DHCP changes do not break connectivity.
+if command -v ufw >/dev/null 2>&1; then
+    echo "Configuring UFW MQTT ports..."
+    sudo ufw allow 1883/tcp comment 'MQTT TCP' || true
+    sudo ufw allow 9001/tcp comment 'MQTT WebSockets' || true
+    sudo ufw allow 9002/tcp comment 'MQTT WSS' || true
+    sudo ufw status | grep -E '1883|9001|9002' || true
+else
+    echo "UFW not installed — skipping firewall rules for MQTT ports."
+fi
 
 # ---------- 13. Set Bluetooth Name ----------
 echo "Set Bluetooth Name"

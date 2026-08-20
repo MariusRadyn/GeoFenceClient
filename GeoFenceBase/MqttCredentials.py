@@ -30,6 +30,9 @@ MQTT_CREDS_FILE = os.path.join(SECURE_DIR, "mqtt_credentials.json")
 MOSQUITTO_PASSWD = "/etc/mosquitto/passwd"
 MOSQUITTO_ACL = "/etc/mosquitto/acl"
 MOSQUITTO_CONF_D = "/etc/mosquitto/conf.d/geofence.conf"
+MOSQUITTO_CERT_DIR = "/etc/mosquitto/certs"
+MOSQUITTO_CERT_FILE = os.path.join(MOSQUITTO_CERT_DIR, "cert.pem")
+MOSQUITTO_KEY_FILE = os.path.join(MOSQUITTO_CERT_DIR, "key.pem")
 
 MQTT_USER_BASE = "base"
 MQTT_USER_IOT = "iot"
@@ -43,15 +46,21 @@ FIRE_COLLECT_CLIENTS = "clients"
 SERVICE_ACCOUNT_KEY = os.path.join(_resolve_secure_dir(), "ServiceAccountKey.json")
 
 MOSQUITTO_CONF = """# GeoFence — TCP for Android/IoT/Pi, WebSockets for Flutter web
-# Do not add another listener 1883 / 9001 elsewhere
+# Do not add another listener 1883 / 9001 / 9002 elsewhere
 
 # MQTT over TCP (Android app, IoT devices, GeoFenceClient on Pi)
 listener 1883 0.0.0.0
 protocol mqtt
 
-# MQTT over WebSockets (Flutter web — browsers cannot use TCP 1883)
+# MQTT over WebSockets (Flutter web on http:// pages)
 listener 9001 0.0.0.0
 protocol websockets
+
+# MQTT over secure WebSockets (Flutter web on https:// pages)
+listener 9002 0.0.0.0
+protocol websockets
+certfile /etc/mosquitto/certs/cert.pem
+keyfile /etc/mosquitto/certs/key.pem
 
 allow_anonymous false
 password_file /etc/mosquitto/passwd
@@ -188,6 +197,82 @@ def _run_mosquitto_passwd(username: str, password: str, create: bool = False):
         cmd.append("-c")  # required when creating a new passwd file
     cmd.extend([MOSQUITTO_PASSWD, username, password])
     subprocess.run(cmd, check=True)
+def _local_ipv4_addresses() -> list[str]:
+    ips = []
+    try:
+        result = subprocess.run(
+            ["hostname", "-I"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for token in result.stdout.split():
+            token = token.strip()
+            if token.count(".") == 3 and not token.startswith("127."):
+                ips.append(token)
+    except Exception:
+        pass
+    return ips
+
+
+def _ensure_wss_certs():
+    """Create a self-signed cert for Mosquitto WSS (port 9002) if missing."""
+    _sudo_run(["mkdir", "-p", MOSQUITTO_CERT_DIR], check=False)
+
+    cert_exists = subprocess.run(
+        ["sudo", "test", "-f", MOSQUITTO_CERT_FILE]
+    ).returncode == 0
+    key_exists = subprocess.run(
+        ["sudo", "test", "-f", MOSQUITTO_KEY_FILE]
+    ).returncode == 0
+    if cert_exists and key_exists:
+        printDebug(f"WSS cert already present: {MOSQUITTO_CERT_FILE}", set.PRINT_DEBUG_MQTT_CREDS)
+        return
+
+    san_parts = ["DNS:geofence-base", "DNS:geofence-base.local", "DNS:localhost"]
+    for ip in _local_ipv4_addresses():
+        san_parts.append(f"IP:{ip}")
+    san = ",".join(san_parts)
+
+    openssl_cfg = (
+        "[req]\n"
+        "distinguished_name=req_dn\n"
+        "x509_extensions=v3_req\n"
+        "prompt=no\n"
+        "[req_dn]\n"
+        "CN=geofence-base\n"
+        "[v3_req]\n"
+        "subjectAltName=" + san + "\n"
+        "keyUsage=digitalSignature,keyEncipherment\n"
+        "extendedKeyUsage=serverAuth\n"
+    )
+    cfg_path = "/tmp/geofence-mosquitto-wss.cnf"
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write(openssl_cfg)
+
+    result = _sudo_run(
+        [
+            "openssl", "req", "-x509", "-nodes", "-days", "3650",
+            "-newkey", "rsa:2048",
+            "-keyout", MOSQUITTO_KEY_FILE,
+            "-out", MOSQUITTO_CERT_FILE,
+            "-config", cfg_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        printDebug("ERROR: openssl failed to create WSS certificate", set.PRINT_DEBUG_FIRESTORE)
+        if result.stderr:
+            printDebug(result.stderr, set.PRINT_DEBUG_FIRESTORE)
+        sys.exit(1)
+
+    _sudo_run(["chown", "mosquitto:mosquitto", MOSQUITTO_CERT_FILE, MOSQUITTO_KEY_FILE], check=False)
+    _sudo_run(["chmod", "644", MOSQUITTO_CERT_FILE], check=False)
+    _sudo_run(["chmod", "640", MOSQUITTO_KEY_FILE], check=False)
+    printDebug(f"Created WSS certificate SAN={san}", set.PRINT_DEBUG_MQTT_CREDS)
+
+
 def _sudo_run(cmd: list, **kwargs):
     return subprocess.run(["sudo"] + cmd, **kwargs)
 def _disable_conflicting_mosquitto_snippets():
@@ -257,6 +342,8 @@ def setup_mosquitto(force_creds: bool = False):
 
     _disable_conflicting_mosquitto_snippets()
 
+    _ensure_wss_certs()
+
     _sudo_run(
         ["tee", MOSQUITTO_CONF_D],
         input=MOSQUITTO_CONF.encode("utf-8"),
@@ -280,7 +367,11 @@ def setup_mosquitto(force_creds: bool = False):
 
     printDebug(f"Mosquitto auth enabled. Credentials: {MQTT_CREDS_FILE}",set.PRINT_DEBUG_MQTT_CREDS)
     printDebug("Roles: base (Pi), iot (devices), android (app/web)", set.PRINT_DEBUG_MQTT_CREDS)
-    printDebug("Listeners: TCP 1883 (native), WebSockets 9001 (Flutter web)", set.PRINT_DEBUG_MQTT_CREDS)
+    printDebug("Listeners: TCP 1883, WS 9001, WSS 9002 (Flutter https)", set.PRINT_DEBUG_MQTT_CREDS)
+    printDebug(
+        "Phone HTTPS app: once open https://<base-ip>:9002 in Chrome and accept the warning, then reconnect.",
+        set.PRINT_DEBUG_MQTT_CREDS,
+    )
     push_credentials_to_firestore()
 
 def main():

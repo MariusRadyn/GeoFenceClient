@@ -368,6 +368,8 @@ class MqttServer:
 
                 # Find Monitor (locate: beep + LEDs) — forward to that IoT
                 if(command == MQTT_CMD_FIND):
+                    # Always print (even without --mqtt) so Find is easy to verify.
+                    print(f"FIND from app: to={to_id!r} from={from_id!r}", flush=True)
                     if not to_id:
                         self.printDebug("FIND missing to_id", cfg.PRINT_DEBUG_ERROR)
                     else:
@@ -383,6 +385,7 @@ class MqttServer:
                         }
 
                         client.publish(response_topic, json.dumps(txPayload))
+                        print(f"FIND → {response_topic}", flush=True)
                         self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
                 # PING (Check if Base is there)

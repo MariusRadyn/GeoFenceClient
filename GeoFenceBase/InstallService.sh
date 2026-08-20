@@ -26,6 +26,7 @@ if [ "$SCRIPT_DIR" != "$APP_DIR" ]; then
         GeoFenceClient.py Settings.py WifiCredentials.py MqttCredentials.py
         MqttService.py SqlLite.py ConfigureRaspberry.sh InstallService.sh
         geofence.service geofence.conf.example 50-geofence-networkmanager.rules
+        requirements.txt
     )
     echo "Moving app files into $APP_DIR ..."
     for f in "${APP_FILES[@]}"; do

@@ -185,6 +185,14 @@ def read_credentials_file():
     creds["password"] = str(data_dict.get("password", ""))
 
     return creds
+def is_interactive() -> bool:
+    """False under systemd (no TTY) — cannot prompt for SSID/password."""
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+
 def get_credentials(new_creds=False):
 
     creds = {
@@ -192,6 +200,20 @@ def get_credentials(new_creds=False):
         "password": ""
     }
     create_secure_dir()
+
+    if new_creds and not is_interactive():
+        printDebug(
+            "ERROR: --newcreds / \"newcreds\": true needs a terminal (SSID + password).\n"
+            "Do not run this from the geofence service.\n"
+            "Stop the service, then as geoserver run:\n"
+            "  sudo systemctl stop geofence\n"
+            "  /home/geoserver/venv312/bin/python /home/geoserver/GeoFenceBase/WifiCredentials.py --newcreds\n"
+            "  sudo systemctl start geofence",
+            cfg.PRINT_DEBUG_ERROR,
+        )
+        # One-shot: clear so systemd Restart= does not keep prompting
+        cfg.clear_newcreds()
+        new_creds = False
 
     if new_creds:
         # Create new credentials — verify with nmcli before saving
@@ -221,7 +243,7 @@ def get_credentials(new_creds=False):
     else:
         # Read existing credentials
         if not os.path.exists(DATA_FILE):
-            printDebug("No WiFi credentials file found. Run with --newcreds.", cfg.PRINT_DEBUG_ERROR)
+            printDebug("No WiFi credentials file found. Run with --newcreds from a terminal.", cfg.PRINT_DEBUG_ERROR)
             if getattr(args, "wifi", False):
                 sys.exit(1)
             return creds["ssid"], creds["password"]
