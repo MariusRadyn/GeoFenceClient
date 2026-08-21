@@ -49,6 +49,7 @@ APP_FILES=(
     geofence.service
     geofence.conf.example
     50-geofence-networkmanager.rules
+    requirements.txt
 )
 
 # Always gather missing app files into APP_DIR (from script dir and/or user home)
@@ -146,15 +147,32 @@ echo "Upgrading pip..."
 "$VENV_DIR/bin/pip" install --upgrade pip
 
 # ---------- 9. Install Python packages into this venv ----------
-REQ_FILE="$APP_DIR/requirements.txt"
-if [ -f "$REQ_FILE" ]; then
-    echo "Installing from $REQ_FILE ..."
-    "$VENV_DIR/bin/pip" install -r "$REQ_FILE"
-else
-    echo "Installing firebase-admin, bleak, paho-mqtt, cryptography ..."
-    "$VENV_DIR/bin/pip" install firebase-admin bleak paho-mqtt cryptography
+REQ_FILE=""
+for cand in "$APP_DIR/requirements.txt" "$ORIGIN_DIR/requirements.txt" "$APP_HOME/requirements.txt"; do
+    if [ -f "$cand" ]; then
+        REQ_FILE="$cand"
+        break
+    fi
+done
+if [ -z "$REQ_FILE" ]; then
+    echo "Creating $APP_DIR/requirements.txt ..."
+    cat > "$APP_DIR/requirements.txt" <<'EOF'
+firebase-admin
+bleak
+paho-mqtt
+cryptography
+EOF
+    REQ_FILE="$APP_DIR/requirements.txt"
+elif [ "$REQ_FILE" != "$APP_DIR/requirements.txt" ]; then
+    cp "$REQ_FILE" "$APP_DIR/requirements.txt"
+    REQ_FILE="$APP_DIR/requirements.txt"
 fi
-"$VENV_DIR/bin/python" -c "import firebase_admin, bleak, paho.mqtt.client; print('venv packages OK:', firebase_admin.__file__)"
+
+echo "Installing Python packages from $REQ_FILE into $VENV_DIR ..."
+"$VENV_DIR/bin/pip" install -r "$REQ_FILE"
+"$VENV_DIR/bin/python" -c "import firebase_admin, bleak, paho.mqtt.client, cryptography; print('venv packages OK')"
+echo "NOTE: Always run GeoFence with the venv Python (not system python3):"
+echo "  $VENV_DIR/bin/python $APP_DIR/GeoFenceClient.py"
 
 # ---------- 10. Install MQTT (Mosquitto) with authentication ----------
 echo "Installing MQTT (Mosquitto)..."
@@ -254,6 +272,8 @@ pip --version
 echo "Setup complete!"
 echo "  App dir: $APP_DIR"
 echo "  Venv:    $VENV_DIR"
+echo "  Run:     $VENV_DIR/bin/python $APP_DIR/GeoFenceClient.py"
+echo "  Or:      source $VENV_DIR/bin/activate && python GeoFenceClient.py"
 if [ -d "$APP_HOME/venv310" ]; then
     echo "Note: old ~/venv310 is unused; you can remove it after confirming the service works:"
     echo "  rm -rf $APP_HOME/venv310"
