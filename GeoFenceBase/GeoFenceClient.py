@@ -808,8 +808,8 @@ def fire_sync_ip_address(ipLocal):
         fire_write_ip_adr(BT_NAME, ipLocal)
         return True
 
-    # IP unchanged — still ensure MQTT creds are on the client doc if configured
-    fire_write_mqtt_creds(BT_NAME)
+    # IP already matches Firestore (and settings) — skip MQTT creds push too
+    printDebug("IP unchanged — skip Firestore IP/creds write", cfg.PRINT_DEBUG_IP_INFO)
     return False
 def fire_write_ip_adr(bt_name="",ip_address=""):
     
@@ -1307,9 +1307,9 @@ async def bt_send_shoesh_to_iot(ble_name: str) -> bool:
         _shoesh_last_sent[name] = now
         return True
     return False
-async def bt_send_credentials(device):
+async def bt_send_credentials(device, force: bool = False):
     try:
-        if not should_send_ble_credentials(device):
+        if not force and not should_send_ble_credentials(device):
             return False
 
         printDebug("Sending Credentials... ", cfg.PRINT_DEBUG_GENERAL)
@@ -1334,7 +1334,56 @@ async def bt_send_credentials(device):
     except Exception as e:
         printDebug(f"ERROR: bt_send_credentials() {device.name}: {e}", cfg.PRINT_DEBUG_BT)
         return False
-    return False 
+    return False
+
+async def bt_force_send_wifi(to_id: str = "") -> int:
+    """
+    Force WiFi/MQTT creds over BLE to IoT(s).
+    If to_id is set, only that BLE name; otherwise all currently BLE-connected IoTs.
+    Opens the pair window so a late PAIRING notify can still receive creds.
+    """
+    target = (to_id or "").strip()
+    enter_pair_mode(cfg.PAIR_MODE_SECONDS)
+    sent = 0
+
+    candidates = []
+    for entry in list(lstBtConnectedDevices):
+        name = (entry.get(CONNECT_NAME) or "").strip()
+        addr = entry.get(CONNECT_ADR) or ""
+        if not name or not addr:
+            continue
+        if target and name != target and name.upper() != target.upper():
+            continue
+        client = BT_CLIENTS.get(addr)
+        if client is None or not client.is_connected:
+            continue
+        candidates.append((name, addr))
+
+    if not candidates:
+        print(
+            f"SEND_WIFI: no BLE-connected IoT"
+            + (f" matching {target!r}" if target else ""),
+            flush=True,
+        )
+        return 0
+
+    for name, addr in candidates:
+        cfg.allow_iot_pair(addr, cfg.PAIR_MODE_SECONDS)
+        cfg.allow_iot_pair(name, cfg.PAIR_MODE_SECONDS)
+
+        class _Dev:
+            pass
+
+        dev = _Dev()
+        dev.address = addr
+        dev.name = name
+        print(f"SEND_WIFI: forcing BLE creds → {name} ({addr})", flush=True)
+        if await bt_send_credentials(dev, force=True):
+            add_paired_iot(ble_address=addr, ble_name=name)
+            sent += 1
+
+    print(f"SEND_WIFI: sent to {sent}/{len(candidates)} device(s)", flush=True)
+    return sent 
 def bt_get_name():
     printDebug("Getting Bluetooth Name... ",cfg.PRINT_DEBUG_GENERAL)
     try:
@@ -1385,7 +1434,7 @@ async def bt_on_iot_notify(device, data):
     addr = getattr(device, "address", "") or ""
     cmd = text.split(":", 1)[0].strip().upper()
 
-    printDebug(f"BLE RX ({name}): {text}", cfg.PRINT_DEBUG_BT)
+    #printDebug(f"BLE RX ({name}): {text}", cfg.PRINT_DEBUG_BT)
 
     if cmd == cfg.CMD_BLE_PAIRING:
         enter_pair_mode(cfg.PAIR_MODE_SECONDS)
@@ -1540,7 +1589,8 @@ async def main():
                         elif command == cfg.CMD_BLE_SHOESH:
                             iot_id = message.get(MqttService.MQTT_SETTING_FROM_DEVICE_ID, "")
                             printDebug(
-                                f"MQTT #PING from unpaired {iot_id!r} — sending BLE {cfg.CMD_BLE_SHOESH}",
+                                f"IoT {iot_id!r} tried to connect to this base but is not registered "
+                                f"— sending BLE {cfg.CMD_BLE_SHOESH}",
                                 True,
                             )
                             asyncio.create_task(bt_send_shoesh_to_iot(iot_id))
@@ -1549,6 +1599,11 @@ async def main():
                         # IoT must then send PAIRING over BLE to receive WiFi creds
                         elif command == MqttService.MQTT_CMD_DISCOVERY:
                             enter_pair_mode(cfg.PAIR_MODE_SECONDS)
+
+                        # Force BLE WiFi/MQTT credentials to IoT(s)
+                        elif command == MqttService.MQTT_CMD_SEND_WIFI:
+                            to_id = message.get(MqttService.MQTT_SETTING_TO_DEVICE_ID, "") or ""
+                            asyncio.create_task(bt_force_send_wifi(to_id))
 
                         # Connect Base
                         elif command == MqttService.MQTT_CMD_CONNECT_BASE:

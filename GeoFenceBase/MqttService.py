@@ -50,6 +50,7 @@ MQTT_CMD_CONNECT_BASE = "#CONNECT_BASE"
 MQTT_CMD_DISCONNECT_MONITOR = "#DISCONNECT_MONITOR"
 MQTT_CMD_PING = "#PING"
 MQTT_CMD_FIND = "#FIND"
+MQTT_CMD_SEND_WIFI = "#SEND_WIFI"  # Android → base: force BLE WiFi/MQTT creds to IoT
 MQTT_CMD_SETTINGS = "#REQ_SETTINGS"
 MQTT_CMD_ACK = "#ACK"
 MQTT_CMD_DEVICE_ID = "#DEVICE_ID"
@@ -224,7 +225,8 @@ class MqttServer:
         self.printDebug(f"MQTT Connected: {reason_code}", cfg.PRINT_DEBUG_MQTT)
         
         client.subscribe(MQTT_TOPIC_FROM_IOT)
-        self.printDebug(f"MQTT Subscribed: {MQTT_TOPIC_FROM_IOT}", cfg.PRINT_DEBUG_MQTT)
+        client.subscribe(f"{MQTT_TOPIC_FROM_IOT}/#")
+        self.printDebug(f"MQTT Subscribed: {MQTT_TOPIC_FROM_IOT} (+ /#)", cfg.PRINT_DEBUG_MQTT)
  
         client.subscribe(MQTT_TOPIC_FROM_ANDROID)
         self.printDebug(f"MQTT Subscribed: {MQTT_TOPIC_FROM_ANDROID}", cfg.PRINT_DEBUG_MQTT)
@@ -388,6 +390,33 @@ class MqttServer:
                         print(f"FIND → {response_topic}", flush=True)
                         self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
+                # Force BLE WiFi/MQTT credentials to IoT (re-provision)
+                if(command == MQTT_CMD_SEND_WIFI):
+                    print(
+                        f"SEND_WIFI from app: to={to_id!r} from={from_id!r}",
+                        flush=True,
+                    )
+                    try:
+                        self.queue.put_nowait(jsondata)
+                    except Full:
+                        self.queue.get_nowait()
+                        self.queue.put_nowait(jsondata)
+
+                    # Ack to Android so the UI knows the base accepted the request
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
+                    txPayload = {
+                        MQTT_SETTING_FROM_DEVICE_ID: myId,
+                        MQTT_SETTING_TO_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: {
+                            "status": "queued",
+                            "to": to_id or "",
+                        },
+                        MQTT_SETTING_CMD: MQTT_CMD_SEND_WIFI,
+                    }
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
+
                 # PING (Check if Base is there)
                 if(command == MQTT_CMD_PING):         
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
@@ -445,8 +474,8 @@ class MqttServer:
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
             
-            # From IOT
-            if(msg.topic == MQTT_TOPIC_FROM_IOT):
+            # From IOT (shared topic or per-device: mqtt/from/iot/<id>)
+            if msg.topic == MQTT_TOPIC_FROM_IOT or msg.topic.startswith(MQTT_TOPIC_FROM_IOT + "/"):
                  # Pair - Scan Monitor ID 
                 if(command == MQTT_CMD_DISCOVERY):
                     response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
@@ -463,7 +492,11 @@ class MqttServer:
 
                 # FROM HERE ONLY PAIRED DEVICES CAN RESPOND
                 if not cfg.is_iot_paired(ble_address="", ble_name=from_id):
-                    self.printDebug(f"MQTT Block: {from_id} not paired", cfg.PRINT_MQTT_COMMS)
+                    self.printDebug(
+                        f"IGNORE - IoT {from_id!r} not paired "
+                        f"(cmd={command}, topic={msg.topic})",
+                        cfg.PRINT_DEBUG_GENERAL,
+                    )
                     
                     # Unpaired IoT PINGing this base → tell it via BLE to stop MQTT
                     if command == MQTT_CMD_PING:
