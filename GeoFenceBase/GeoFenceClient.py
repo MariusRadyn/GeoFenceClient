@@ -104,6 +104,7 @@ JSON_IOT_NAME = "iotName"
 TARGET_PREFIX = "iOT"
 FIRE_COLLECT_CLIENTS = "clients"
 FIRE_COLLECT_USERS = "users"
+FIRE_COLLECT_BASE_STATIONS = "baseStations"
 FIRE_COLLECT_MONITORS = "monitors"
 FIRE_COLLECT_IOT_DATA = "iotData"
 FIRE_COLLECT_OPERATORS = "operators"
@@ -120,6 +121,7 @@ FIRE_SETTING_MON_TYPE = "type"
 FIRE_SETTING_MON_NAME = "iotName"
 FIRE_SETTING_MON_ID = "monDocId"
 FIRE_SETTING_USER_DOC_ID = "userDocId"
+FIRE_BASE_STATION_DOC_ID = "baseStationDocId"
 FIRE_TIMESTAMP = "timestamp"
 # Client-generated id; used as the Firestore document id under iotData so retries cannot duplicate rows.
 FIRE_IOT_WRITE_ID = "iotWriteId"
@@ -168,8 +170,14 @@ class MONITOR_DATA:
     image_filename: str = ""
     mon_: str = ""
     mon_type: str = ""
+    base_station_doc_id: str = ""
 
 MONITOR_DATA_LIST: List[MONITOR_DATA] = []
+# baseStationDocId -> monitors for that base ("" = legacy users/{uid}/monitors)
+_monitors_by_base: dict = {}
+_base_monitor_listeners: dict = {}  # base_id -> listener
+_bases_listener_ref = None
+_legacy_monitors_listener_ref = None
 
 cred = credentials.Certificate(os.path.expanduser("~/Secure/ServiceAccountKey.json"))
 firebase_admin.initialize_app(cred)
@@ -248,10 +256,25 @@ def start_operators_version_listener(uid):
         operators_version_listener_uid = None
         return False
 def on_snapshot_monitors(doc_snapshot, changes, read_time):
-    global MONITOR_DATA_LIST
+    """Legacy listener for users/{uid}/monitors (pre baseStations nesting)."""
+    _ingest_monitor_snapshot(doc_snapshot, base_station_doc_id="")
 
-    MONITOR_DATA_LIST.clear()
-    to_delete = []  # (mon_doc_id, mon_device_id, mon_name)
+def _rebuild_monitor_list():
+    global MONITOR_DATA_LIST
+    rebuilt = []
+    for mons in _monitors_by_base.values():
+        rebuilt.extend(mons)
+    MONITOR_DATA_LIST = rebuilt
+    printDebug(f"\nMonitor Data: {MONITOR_DATA_LIST}\n", cfg.PRINT_DEBUG_MONITOR)
+    if rebuilt:
+        printDebug(f"Monitors loaded from Firestore: {len(rebuilt)}", True)
+
+def _ingest_monitor_snapshot(doc_snapshot, base_station_doc_id: str):
+    """Parse a monitors collection snapshot into cache for one base (or legacy)."""
+    global _monitors_by_base
+
+    mons = []
+    to_delete = []  # (mon_doc_id, mon_device_id, mon_name, base_id)
 
     for doc in doc_snapshot:
         if not doc.exists:
@@ -268,14 +291,14 @@ def on_snapshot_monitors(doc_snapshot, changes, read_time):
         mon_type = data.get(FIRE_SETTING_MON_TYPE)
 
         if data.get(FIRE_MONITOR_MARKED_FOR_DELETE) is True:
-            to_delete.append((mon_id, mon_device_id, mon_name))
+            to_delete.append((mon_id, mon_device_id, mon_name, base_station_doc_id))
             printDebug(
-                f"Monitor markedForDelete: doc={mon_id} device={mon_device_id}",
+                f"Monitor markedForDelete: doc={mon_id} device={mon_device_id} base={base_station_doc_id}",
                 cfg.PRINT_DEBUG_MONITOR,
             )
             continue
 
-        MONITOR_DATA_LIST.append(
+        mons.append(
             MONITOR_DATA(
                 mon_doc_id=mon_id,
                 mon_device_id=mon_device_id,
@@ -283,16 +306,81 @@ def on_snapshot_monitors(doc_snapshot, changes, read_time):
                 image_url=mon_image_url or "",
                 image_filename=mon_image_filename or "",
                 mon_type=mon_type or "",
+                base_station_doc_id=base_station_doc_id or "",
             )
         )
 
-    printDebug(f"\nMonitor Data: {MONITOR_DATA_LIST}\n", cfg.PRINT_DEBUG_MONITOR)
+    _monitors_by_base[base_station_doc_id or ""] = mons
+    _rebuild_monitor_list()
 
-    for mon_id, mon_device_id, mon_name in to_delete:
-        _delete_marked_monitor(mon_id, mon_device_id, mon_name)
+    for mon_id, mon_device_id, mon_name, base_id in to_delete:
+        _delete_marked_monitor(
+            mon_id,
+            mon_device_id,
+            mon_name,
+            base_station_doc_id=base_id,
+        )
+
+def _make_base_monitors_handler(base_id: str):
+    def handler(doc_snapshot, changes, read_time):
+        _ingest_monitor_snapshot(doc_snapshot, base_station_doc_id=base_id)
+    return handler
+
+def on_snapshot_base_stations(doc_snapshot, changes, read_time):
+    """Keep a monitors listener attached for each baseStations/{baseId}."""
+    global _base_monitor_listeners
+
+    uid = monitors_listener_uid
+    if not uid:
+        return
+
+    live_ids = set()
+    for doc in doc_snapshot:
+        if doc.exists:
+            live_ids.add(doc.id)
+
+    # Drop listeners for removed bases
+    for base_id in list(_base_monitor_listeners.keys()):
+        if base_id not in live_ids:
+            try:
+                _base_monitor_listeners[base_id].unsubscribe()
+            except Exception:
+                pass
+            _base_monitor_listeners.pop(base_id, None)
+            _monitors_by_base.pop(base_id, None)
+
+    # Attach listeners for new bases
+    for base_id in live_ids:
+        if base_id in _base_monitor_listeners:
+            continue
+        try:
+            ref = (
+                dbFire.collection(FIRE_COLLECT_USERS)
+                .document(uid)
+                .collection(FIRE_COLLECT_BASE_STATIONS)
+                .document(base_id)
+                .collection(FIRE_COLLECT_MONITORS)
+            )
+            _base_monitor_listeners[base_id] = ref.on_snapshot(
+                _make_base_monitors_handler(base_id)
+            )
+            printDebug(
+                f"Monitors listener attached for base={base_id}",
+                cfg.PRINT_DEBUG_GENERAL,
+            )
+        except Exception as e:
+            printDebug(
+                f"ERROR: monitors listener for base={base_id}: {e}",
+                cfg.PRINT_DEBUG_ERROR,
+            )
+
+    _rebuild_monitor_list()
+
 def start_monitors_listener(uid):
-    """Attach Firestore snapshot listener for monitors; Watch Monitor Name, imageURL, imageFilename."""
+    """Listen to baseStations/*/monitors (+ legacy users/*/monitors)."""
     global MONITOR_DATA_LIST, monitors_doc_ref, monitors_listener_uid
+    global _bases_listener_ref, _legacy_monitors_listener_ref
+    global _base_monitor_listeners, _monitors_by_base
 
     if uid is None:
         printDebug("Cloud monitors listener not started: No UID. (Connect Android to BASE).", cfg.PRINT_DEBUG_ERROR)
@@ -307,15 +395,51 @@ def start_monitors_listener(uid):
         return False
 
     try:
-        if monitors_doc_ref is not None:
-            monitors_doc_ref.unsubscribe()
-        monitors_doc_ref  = None
-        monitors_listener_uid = None
+        # Tear down previous listeners
+        if _bases_listener_ref is not None:
+            try:
+                _bases_listener_ref.unsubscribe()
+            except Exception:
+                pass
+        if _legacy_monitors_listener_ref is not None:
+            try:
+                _legacy_monitors_listener_ref.unsubscribe()
+            except Exception:
+                pass
+        for listener in _base_monitor_listeners.values():
+            try:
+                listener.unsubscribe()
+            except Exception:
+                pass
 
+        _bases_listener_ref = None
+        _legacy_monitors_listener_ref = None
+        _base_monitor_listeners = {}
+        _monitors_by_base = {}
+        monitors_doc_ref = None
+        monitors_listener_uid = None
         MONITOR_DATA_LIST = []
-        doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(uid).collection(FIRE_COLLECT_MONITORS)
-        monitors_doc_ref = doc_ref.on_snapshot(on_snapshot_monitors)
+
         monitors_listener_uid = uid
+
+        # Nested path: users/{uid}/baseStations
+        bases_ref = (
+            dbFire.collection(FIRE_COLLECT_USERS)
+            .document(uid)
+            .collection(FIRE_COLLECT_BASE_STATIONS)
+        )
+        _bases_listener_ref = bases_ref.on_snapshot(on_snapshot_base_stations)
+        # Keep a non-None marker so "already running" checks still work.
+        monitors_doc_ref = _bases_listener_ref
+
+        # Legacy flat path: users/{uid}/monitors (migration leftover / offline queue)
+        legacy_ref = (
+            dbFire.collection(FIRE_COLLECT_USERS)
+            .document(uid)
+            .collection(FIRE_COLLECT_MONITORS)
+        )
+        _legacy_monitors_listener_ref = legacy_ref.on_snapshot(on_snapshot_monitors)
+
         printDebug(f"Monitors Cloud listener started on: {uid}", cfg.PRINT_DEBUG_GENERAL)
         return True
 
@@ -343,7 +467,12 @@ def _resolve_uid_from_payload(payload) -> str:
         or ""
     )
     return str(uid).strip()
-def _delete_marked_monitor(mon_doc_id: str, mon_device_id: str = "", mon_name: str = ""):
+def _delete_marked_monitor(
+    mon_doc_id: str,
+    mon_device_id: str = "",
+    mon_name: str = "",
+    base_station_doc_id: str = "",
+):
     """Remove from paired list, then delete the Firestore monitor document."""
     uid = monitors_listener_uid
     if not uid:
@@ -357,9 +486,15 @@ def _delete_marked_monitor(mon_doc_id: str, mon_device_id: str = "", mon_name: s
     )
 
     try:
-        dbFire.collection(FIRE_COLLECT_USERS).document(uid) \
-            .collection(FIRE_COLLECT_MONITORS).document(mon_doc_id) \
-            .delete()
+        if base_station_doc_id:
+            dbFire.collection(FIRE_COLLECT_USERS).document(uid) \
+                .collection(FIRE_COLLECT_BASE_STATIONS).document(base_station_doc_id) \
+                .collection(FIRE_COLLECT_MONITORS).document(mon_doc_id) \
+                .delete()
+        else:
+            dbFire.collection(FIRE_COLLECT_USERS).document(uid) \
+                .collection(FIRE_COLLECT_MONITORS).document(mon_doc_id) \
+                .delete()
         printDebug(f"Deleted Firestore monitor: {mon_doc_id}", cfg.PRINT_DEBUG_FIRESTORE)
     except Exception as e:
         printDebug(f"ERROR: delete monitor {mon_doc_id}: {e}", cfg.PRINT_DEBUG_ERROR)
@@ -372,6 +507,32 @@ def get_monitor_data_by_device_id(iot_device_id: str) -> Optional[MONITOR_DATA]:
         return None
     for mon in MONITOR_DATA_LIST:
         if mon.mon_device_id == device_id:
+            return mon
+    return None
+
+
+def get_monitor_data_by_name(iot_name: str) -> Optional[MONITOR_DATA]:
+    """Return the monitor whose mon_name matches (e.g. BLE / MQTT from id)."""
+    name = (iot_name or "").strip()
+    if not name:
+        return None
+    for mon in MONITOR_DATA_LIST:
+        if (mon.mon_name or "").strip() == name:
+            return mon
+    return None
+
+
+def resolve_monitor(payload_monitor_id: str = "", mqtt_from_id: str = "") -> Optional[MONITOR_DATA]:
+    """Find monitor by payload monitorId, then MQTT from id (device id or name)."""
+    for key in (payload_monitor_id, mqtt_from_id):
+        key = (key or "").strip()
+        if not key:
+            continue
+        mon = get_monitor_data_by_device_id(key)
+        if mon:
+            return mon
+        mon = get_monitor_data_by_name(key)
+        if mon:
             return mon
     return None
 def checkWifiConnection(quiet: bool = False):
@@ -610,28 +771,39 @@ def _ensure_iot_write_id(doc):
     nid = uuid.uuid4().hex
     doc[FIRE_IOT_WRITE_ID] = nid
     return nid
-def _commit_wheel_write(userDocId, monDocId, doc, tStamp):
+def _commit_wheel_write(userDocId, monDocId, doc, tStamp, baseStationDocId=""):
     """Build and commit the wheel batch with a short timeout. Returns True on success."""
     iot_write_id = _ensure_iot_write_id(doc)
     batch = dbFire.batch()
 
-    iot_doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId) \
-        .collection(FIRE_COLLECT_MONITORS).document(monDocId) \
-        .collection(FIRE_COLLECT_IOT_DATA).document(iot_write_id)
-    batch.set(iot_doc_ref, doc, merge=False)
+    base_id = (baseStationDocId or doc.get(FIRE_BASE_STATION_DOC_ID) or "").strip()
+    if base_id:
+        mon_doc_ref = (
+            dbFire.collection(FIRE_COLLECT_USERS).document(userDocId)
+            .collection(FIRE_COLLECT_BASE_STATIONS).document(base_id)
+            .collection(FIRE_COLLECT_MONITORS).document(monDocId)
+        )
+    else:
+        # Legacy flat path (pre multi-base nesting)
+        mon_doc_ref = (
+            dbFire.collection(FIRE_COLLECT_USERS).document(userDocId)
+            .collection(FIRE_COLLECT_MONITORS).document(monDocId)
+        )
 
-    mon_doc_ref = dbFire.collection(FIRE_COLLECT_USERS).document(userDocId) \
-        .collection(FIRE_COLLECT_MONITORS).document(monDocId)
+    iot_doc_ref = mon_doc_ref.collection(FIRE_COLLECT_IOT_DATA).document(iot_write_id)
+    batch.set(iot_doc_ref, doc, merge=False)
     batch.set(mon_doc_ref, {FIRE_WHEEL_LAST_LOG_TIMESTAMP: tStamp}, merge=True)
 
     batch.commit(timeout=FIRESTORE_WRITE_TIMEOUT)
     return True
-def _commit_with_retry(userDocId, monDocId, doc, tStamp):
+def _commit_with_retry(userDocId, monDocId, doc, tStamp, baseStationDocId=""):
     """Try the write up to 1 + len(FIRESTORE_RETRY_BACKOFF) times. Returns True on success."""
     attempts = 1 + len(FIRESTORE_RETRY_BACKOFF)
     for i in range(attempts):
         try:
-            return _commit_wheel_write(userDocId, monDocId, doc, tStamp)
+            return _commit_wheel_write(
+                userDocId, monDocId, doc, tStamp, baseStationDocId=baseStationDocId
+            )
         except Exception as e:
             is_last = (i == attempts - 1)
             if is_last:
@@ -652,9 +824,13 @@ def _iot_queue_flush():
         remaining = list(queue)
         flushed = 0
         while remaining:
-            userDocId, monDocId, doc, tStamp = remaining[0]
+            entry = remaining[0]
+            userDocId, monDocId, doc, tStamp = entry[:4]
+            base_id = entry[4] if len(entry) > 4 else (doc.get(FIRE_BASE_STATION_DOC_ID) or "")
             try:
-                _commit_wheel_write(userDocId, monDocId, doc, tStamp)
+                _commit_wheel_write(
+                    userDocId, monDocId, doc, tStamp, baseStationDocId=base_id
+                )
                 remaining.pop(0)
                 flushed += 1
             except Exception as e:
@@ -699,21 +875,46 @@ def fire_write_iot_data(payload, iot_device_id=None):
         userDocId = payload.get(JSON_USER_DOC_ID)
         operatorDocId = payload.get(FIRE_WHEEL_OPERATOR_DOC_ID)
         supervisorDocId = payload.get(FIRE_WHEEL_SUPERVISOR_DOC_ID)
-        iot_device_id = payload.get(JSON_MONITOR_DEVICE_ID)
+        # MQTT from_id is the IoT BLE name; payload may also carry monitorId
+        mqtt_from_id = (iot_device_id or "").strip()
+        payload_monitor_id = str(payload.get(JSON_MONITOR_DEVICE_ID) or "").strip()
+        iot_device_id = payload_monitor_id or mqtt_from_id
         iot_name = ""
         img_url = ""
         img_file = ""
         iot_type = ""
         
-        mon_data = get_monitor_data_by_device_id(iot_device_id)
+        mon_data = resolve_monitor(payload_monitor_id, mqtt_from_id)
+        baseStationDocId = payload.get(FIRE_BASE_STATION_DOC_ID) or ""
         if mon_data:
             monDocId = monDocId or mon_data.mon_doc_id
             iot_name = mon_data.mon_name or payload.get(JSON_IOT_NAME, "")
             img_url = mon_data.image_url
             img_file = mon_data.image_filename
             iot_type = mon_data.mon_type
+            iot_device_id = mon_data.mon_device_id or iot_device_id
+            if not baseStationDocId:
+                baseStationDocId = mon_data.base_station_doc_id or ""
+        elif userDocId and monDocId:
+            # Cache empty or slow to sync — IoT payload often carries Firestore IDs
+            iot_name = payload.get(JSON_IOT_NAME, "") or mqtt_from_id
+            iot_type = payload.get(JSON_IOT_TYPE, "") or iotType or ""
+            printDebug(
+                f"fire_write_iot_data: monitor not in cache, using payload IDs "
+                f"(monDocId={monDocId!r}, from={mqtt_from_id!r}, cached={len(MONITOR_DATA_LIST)})",
+                cfg.PRINT_DEBUG_GENERAL,
+            )
         else:
-            printDebug(f"fire_write_iot_data(): Monitor: ({iot_device_id}) not found", cfg.PRINT_DEBUG_ERROR)
+            known = [
+                f"{m.mon_device_id!r}/{m.mon_name!r}" for m in MONITOR_DATA_LIST
+            ] or ["(none — connect Android to BASE / check monitors listener)"]
+            printDebug(
+                f"fire_write_iot_data(): Monitor not found "
+                f"(monitorId={payload_monitor_id!r}, from={mqtt_from_id!r}, "
+                f"userDocId={userDocId!r}, monDocId={monDocId!r}). "
+                f"Known: {', '.join(known)}",
+                cfg.PRINT_DEBUG_ERROR,
+            )
             return
 
         if not userDocId or not monDocId:
@@ -750,6 +951,7 @@ def fire_write_iot_data(payload, iot_device_id=None):
             FIRE_MONITOR_IMAGE_FILENAME: img_file,
             FIRE_SETTING_USER_DOC_ID: userDocId,
             FIRE_SETTING_MON_ID: monDocId,
+            FIRE_BASE_STATION_DOC_ID: baseStationDocId,
             FIRE_WHEEL_OPERATOR_DOC_ID: operatorDocId,
             FIRE_WHEEL_SUPERVISOR_DOC_ID: supervisorDocId,
             FIRE_WHEEL_LINES: lines,
@@ -763,13 +965,15 @@ def fire_write_iot_data(payload, iot_device_id=None):
         else:
             doc[FIRE_IOT_WRITE_ID] = uuid.uuid4().hex
 
-        if _commit_with_retry(userDocId, monDocId, doc, tStamp):
+        if _commit_with_retry(
+            userDocId, monDocId, doc, tStamp, baseStationDocId=baseStationDocId
+        ):
             printDebug(f"Firestore Write: {payload}",cfg.PRINT_DEBUG_FIRESTORE)
             # flush anything that piled up during prior outages.
             _iot_queue_flush()
         else:
             # Capture-time tStamp is preserved so flushed writes keep their original time.
-            _iot_queue_append((userDocId, monDocId, doc, tStamp))
+            _iot_queue_append((userDocId, monDocId, doc, tStamp, baseStationDocId))
             printDebug("Queued IoT write for later retry", cfg.PRINT_DEBUG_ERROR)
 
     except Exception as e:
@@ -1478,7 +1682,8 @@ async def main():
                 printDebug(f"Starting Service ...", True)
 
                 BT_NAME = bt_get_name()
-                printDebug(f"\nBLE ID: {BT_NAME}",cfg.PRINT_DEBUG_BT)
+                printDebug(f"Bluetooth name: {BT_NAME}", True)
+                printDebug(f"\nBLE ID: {BT_NAME}", cfg.PRINT_DEBUG_BT)
                 _load_paired_iots()
                 casePtr+=1
             
@@ -1520,7 +1725,13 @@ async def main():
                 user_id = read_user_id_from_file()
                 printDebug(f"calling start_monitors_listener with user_id={user_id!r}", cfg.PRINT_DEBUG_GENERAL)
                 start_operators_version_listener(user_id)
-                start_monitors_listener(user_id)
+                if start_monitors_listener(user_id):
+                    printDebug(f"Monitors listener started (uid len={len(str(user_id))})", True)
+                elif not user_id:
+                    printDebug(
+                        "Monitors listener not started: no saved UID — connect Android app to BASE",
+                        True,
+                    )
                 casePtr+=1
             
             # Get Wifi Credentials (for BLE share to IoTs; already done in case 1 if --wifi)

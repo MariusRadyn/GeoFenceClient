@@ -35,6 +35,7 @@ MQTT_SETTING_OPERATORS_VERSION = "operatorsVer"
 MQTT_SETTING_CMD = "cmd"
 MQTT_SETTING_WHEEL_DISTANCE = "wheel_distance"
 MQTT_SETTING_TICKS_PER_M = "ticksPerM"
+MQTT_SETTING_CALIBRATION_DISTANCE = "calibrationDistance"
 MQTT_SETTING_IOT_TYPE = "iotType"
 MQTT_SETTING_USER_ID = "userId"
 MQTT_SETTING_DOC_ID = "docId"
@@ -307,12 +308,23 @@ class MqttServer:
 
                 # Calibrate Monitor
                 if(command == MQTT_CMD_CALIBRATE):
-                    
-                    iot_type = payload[MQTT_SETTING_IOT_TYPE]
+                    iot_type = payload.get(MQTT_SETTING_IOT_TYPE, "")
+                    if not iot_type:
+                        self.printDebug(
+                            "CALIBRATE skipped: missing iotType in payload",
+                            cfg.PRINT_DEBUG_ERROR,
+                        )
+                        return
                     
                     settings = {
                         MQTT_SETTING_IOT_TYPE: iot_type,
                     }
+                    cal_dist = payload.get(MQTT_SETTING_CALIBRATION_DISTANCE)
+                    if cal_dist is not None:
+                        settings[MQTT_SETTING_CALIBRATION_DISTANCE] = cal_dist
+                    ticks = payload.get(MQTT_SETTING_TICKS_PER_M)
+                    if ticks is not None:
+                        settings[MQTT_SETTING_TICKS_PER_M] = ticks
                     settings.update(self._iot_mqtt_payload())
 
                     response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
@@ -599,7 +611,7 @@ class MqttServer:
                     txPayload = {
                         MQTT_SETTING_FROM_DEVICE_ID: from_id,
                         MQTT_SETTING_TOPIC: response_topic,
-                        MQTT_SETTING_PAYLOAD: "",
+                        MQTT_SETTING_PAYLOAD: payload if isinstance(payload, dict) else "",
                         MQTT_SETTING_CMD:MQTT_CMD_CALIBRATE
                     }
         
