@@ -46,6 +46,7 @@ MQTT_SETTING_MQTT_PW = MqttCredentials.MQTT_PAYLOAD_PW
 MQTT_CMD_DISCOVERY = "#DISCOVER"
 MQTT_CMD_FOUND_MONITOR = "#FOUND_MONITOR"
 MQTT_CMD_CALIBRATE = "#CALIBRATE"
+MQTT_CMD_SYNC_SETTINGS = "#SYNC_SETTINGS"
 MQTT_CMD_CONNECT_MONITOR = "#CONNECT_MONITOR"
 MQTT_CMD_CONNECT_BASE = "#CONNECT_BASE"
 MQTT_CMD_DISCONNECT_MONITOR = "#DISCONNECT_MONITOR"
@@ -340,6 +341,41 @@ class MqttServer:
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
+                # Sync Settings (ticks/m etc.) to Monitor
+                if(command == MQTT_CMD_SYNC_SETTINGS):
+                    iot_type = ""
+                    ticks = None
+                    if isinstance(payload, dict):
+                        iot_type = payload.get(MQTT_SETTING_IOT_TYPE, "") or ""
+                        ticks = payload.get(MQTT_SETTING_TICKS_PER_M)
+
+                    if ticks is None:
+                        self.printDebug(
+                            "SYNC_SETTINGS skipped: missing ticksPerM in payload",
+                            cfg.PRINT_DEBUG_ERROR,
+                        )
+                        return
+
+                    settings = {
+                        MQTT_SETTING_TICKS_PER_M: ticks,
+                    }
+                    if iot_type:
+                        settings[MQTT_SETTING_IOT_TYPE] = iot_type
+                    settings.update(self._iot_mqtt_payload())
+
+                    response_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
+
+                    txPayload = {
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TO_DEVICE_ID: to_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: settings,
+                        MQTT_SETTING_CMD: MQTT_CMD_SYNC_SETTINGS,
+                    }
+
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
+
                 # Connect to Monitor
                 if(command == MQTT_CMD_CONNECT_MONITOR):
                     
@@ -615,6 +651,21 @@ class MqttServer:
                         MQTT_SETTING_CMD:MQTT_CMD_CALIBRATE
                     }
         
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
+
+                # Sync Settings ack (IOT to Android)
+                if(command == MQTT_CMD_SYNC_SETTINGS):
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
+
+                    txPayload = {
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TO_DEVICE_ID: to_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: payload if isinstance(payload, dict) else "",
+                        MQTT_SETTING_CMD: MQTT_CMD_SYNC_SETTINGS,
+                    }
+
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
