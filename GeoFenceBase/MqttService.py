@@ -226,9 +226,10 @@ class MqttServer:
 
         self.printDebug(f"MQTT Connected: {reason_code}", cfg.PRINT_DEBUG_MQTT)
         
-        client.subscribe(MQTT_TOPIC_FROM_IOT)
+        # Single wildcard only — also subscribing to mqtt/from/iot delivers
+        # the same publish twice (overlapping match) and duplicates Android dialogs.
         client.subscribe(f"{MQTT_TOPIC_FROM_IOT}/#")
-        self.printDebug(f"MQTT Subscribed: {MQTT_TOPIC_FROM_IOT} (+ /#)", cfg.PRINT_DEBUG_MQTT)
+        self.printDebug(f"MQTT Subscribed: {MQTT_TOPIC_FROM_IOT}/#", cfg.PRINT_DEBUG_MQTT)
  
         client.subscribe(MQTT_TOPIC_FROM_ANDROID)
         self.printDebug(f"MQTT Subscribed: {MQTT_TOPIC_FROM_ANDROID}", cfg.PRINT_DEBUG_MQTT)
