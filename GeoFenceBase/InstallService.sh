@@ -27,7 +27,7 @@ if [ "$SCRIPT_DIR" != "$APP_DIR" ]; then
         MqttService.py SqlLite.py ConfigureRaspberry.sh InstallService.sh
         geofence.service geofence.conf.example 50-geofence-networkmanager.rules
         requirements.txt WifiSetupGui.py geofence-wifi-setup.desktop
-        JournalGui.py geofence-journal.desktop
+        JournalGui.py geofence-journal.desktop SetupTrinityUser.sh ssh_keys
     )
     echo "Moving app files into $APP_DIR ..."
     for f in "${APP_FILES[@]}"; do
@@ -163,3 +163,7 @@ echo "NOTE: \"newcreds\": true is one-shot — after WiFi creds are saved it is"
 echo "set back to false in $CONFIG_FILE automatically."
 echo "Desktop: use \"GeoFence WiFi Setup\" instead of --newcreds."
 echo "Desktop: use \"GeoFence Journal\" for live logs."
+echo ""
+echo "Lock down for customer user 'trinity' (SSH keys from ssh_keys file):"
+echo "  edit $APP_DIR/ssh_keys   # one public key per line"
+echo "  sudo bash $APP_DIR/SetupTrinityUser.sh"

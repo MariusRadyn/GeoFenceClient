@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
 """
-Desktop WiFi setup for GeoFence Base.
+Desktop WiFi setup for GeoFence Base (trinity / customer UI).
 
-GUI replacement for --newcreds:
-  - scan / pick SSID
-  - enter password
-  - verify with nmcli
-  - save encrypted creds (~/Secure/wificredentials.enc)
-  - restart geofence.service
-
-Run:
-  ~/venv312/bin/python ~/GeoFenceBase/WifiSetupGui.py
+Lives in /opt/geofence-tools — does NOT import GeoFenceBase.
+Privileged save/list goes through: sudo /opt/geofence-tools/save-wifi
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -22,37 +16,50 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-# App dir on PATH so Settings / WifiCredentials import works from desktop launch
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-if APP_DIR not in sys.path:
-    sys.path.insert(0, APP_DIR)
-
-import WifiCredentials
-
-
 SERVICE_NAME = "geofence"
-VENV_PYTHON = os.path.expanduser("~/venv312/bin/python")
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+SAVE_WIFI = os.path.join(TOOLS_DIR, "save-wifi")
+
+
+def _run_save_wifi(args: list[str], stdin_text: str | None = None) -> tuple[bool, dict]:
+    cmd = ["sudo", "-n", SAVE_WIFI, *args]
+    try:
+        result = subprocess.run(
+            cmd,
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except Exception as e:
+        return False, {"error": str(e)}
+
+    out = (result.stdout or "").strip()
+    try:
+        data = json.loads(out) if out else {}
+    except json.JSONDecodeError:
+        err = out or (result.stderr or "").strip() or f"exit {result.returncode}"
+        return False, {"error": err}
+
+    if result.returncode != 0 or not data.get("ok"):
+        return False, data if data else {"error": (result.stderr or out or "failed")}
+    return True, data
 
 
 def restart_geofence_service() -> tuple[bool, str]:
-    """Restart systemd unit without prompting when sudoers allows it."""
-    cmd = ["sudo", "-n", "systemctl", "restart", SERVICE_NAME]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(
+            ["sudo", "-n", "systemctl", "restart", SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
     except Exception as e:
         return False, str(e)
-
     if result.returncode == 0:
         return True, f"Service '{SERVICE_NAME}' restarted."
-
     err = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
-    hint = (
-        "\n\nAllow passwordless restart (once):\n"
-        f"  echo '{os.getenv('USER', 'geoserver')} ALL=(ALL) NOPASSWD: "
-        f"/bin/systemctl restart {SERVICE_NAME}' | sudo tee "
-        f"/etc/sudoers.d/geofence-wifi-setup"
-    )
-    return False, err + hint
+    return False, err
 
 
 class WifiSetupApp(tk.Tk):
@@ -68,6 +75,7 @@ class WifiSetupApp(tk.Tk):
 
         self._build_ui()
         self.after(200, self.refresh_networks)
+        self.after(300, self._load_current_ssid)
 
     def _build_ui(self):
         pad = {"padx": 12, "pady": 6}
@@ -103,21 +111,11 @@ class WifiSetupApp(tk.Tk):
 
         btn_row = ttk.Frame(frm)
         btn_row.grid(row=4, column=0, columnspan=3, sticky="ew", **pad)
-        self.btn_save = ttk.Button(btn_row, text="Save & Restart GeoFence", command=self.on_save)
+        self.btn_save = ttk.Button(btn_row, text="Save & Restart", command=self.on_save)
         self.btn_save.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="Close", command=self.destroy).pack(side=tk.LEFT)
 
         frm.columnconfigure(1, weight=1)
-
-        # Prefill current SSID if file exists
-        try:
-            if os.path.exists(WifiCredentials.DATA_FILE):
-                cur = WifiCredentials.read_credentials_file()
-                if cur.get("ssid"):
-                    self.ssid_var.set(cur["ssid"])
-                    self.status_var.set(f"Current saved SSID: {cur['ssid']}")
-        except Exception:
-            pass
 
     def _toggle_pw(self):
         self.pw_entry.config(show="" if self.show_pw.get() else "*")
@@ -131,19 +129,32 @@ class WifiSetupApp(tk.Tk):
         if status:
             self.status_var.set(status)
 
+    def _load_current_ssid(self):
+        def work():
+            ok, data = _run_save_wifi(["--show-ssid"])
+            ssid = (data.get("ssid") or "") if ok else ""
+            err = "" if ok else (data.get("error") or "could not read saved SSID")
+            self.after(0, lambda: self._on_show_ssid(ssid, err if not ok else ""))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_show_ssid(self, ssid: str, err: str):
+        if ssid:
+            self.ssid_var.set(ssid)
+            self.status_var.set(f"Current saved SSID: {ssid}")
+        elif err:
+            self.status_var.set(f"Scan for networks, then enter password. ({err})")
+
     def refresh_networks(self):
         if self._busy:
             return
         self._set_busy(True, "Scanning WiFi networks...")
 
         def work():
-            err = ""
-            ssids = []
-            try:
-                ssids = WifiCredentials.list_wifi_ssids(rescan=True)
-            except Exception as e:
-                err = str(e)
-            self.after(0, lambda: self._on_scan_done(ssids, err))
+            ok, data = _run_save_wifi(["--list"])
+            ssids = data.get("ssids") or [] if ok else []
+            err = "" if ok else (data.get("error") or "scan failed")
+            self.after(0, lambda: self._on_scan_done(ssids, err if not ok else ""))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -172,14 +183,11 @@ class WifiSetupApp(tk.Tk):
         self._set_busy(True, f"Testing connection to '{ssid}'...")
 
         def work():
-            ok = False
+            payload = json.dumps({"ssid": ssid, "password": password})
+            ok, data = _run_save_wifi([], stdin_text=payload)
             err = ""
-            try:
-                ok = WifiCredentials.save_new_credentials(ssid, password)
-                if not ok:
-                    err = "Join failed — wrong password or network unavailable. Credentials not saved."
-            except Exception as e:
-                err = str(e)
+            if not ok:
+                err = data.get("error") or "Join failed — credentials not saved."
 
             restart_ok = False
             restart_msg = ""
@@ -198,7 +206,7 @@ class WifiSetupApp(tk.Tk):
             return
 
         if restart_ok:
-            self.status_var.set(f"Saved '{ssid}' and restarted GeoFence.")
+            self.status_var.set(f"Saved '{ssid}' and restarted Service.")
             messagebox.showinfo(
                 "WiFi Setup Complete",
                 f"Credentials for '{ssid}' verified and saved.\n\n{restart_msg}",
@@ -214,18 +222,18 @@ class WifiSetupApp(tk.Tk):
 
 
 def main():
-    # Prefer venv crypto/bleak stack if launched with system python by mistake
-    if not sys.executable.startswith(os.path.expanduser("~/venv312")) and os.path.isfile(VENV_PYTHON):
-        # Still OK if cryptography is importable; WifiCredentials will fail otherwise.
-        pass
-
+    if not os.path.isfile(SAVE_WIFI):
+        messagebox.showerror(
+            "Not installed",
+            f"Missing helper:\n{SAVE_WIFI}\n\nRun SetupTrinityUser.sh on the Pi.",
+        )
+        sys.exit(1)
     try:
         app = WifiSetupApp()
         app.mainloop()
     except tk.TclError as e:
         print(
-            "ERROR: tkinter UI failed. On the Pi install:\n"
-            "  sudo apt install -y python3-tk\n"
+            "ERROR: tkinter UI failed. Install: sudo apt install -y python3-tk\n"
             f"Details: {e}",
             file=sys.stderr,
         )

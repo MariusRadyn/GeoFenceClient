@@ -1,0 +1,6 @@
+# GeoFence — SSH public keys for user "trinity"
+# One key per line. Lines starting with # are ignored.
+# Installed to: /home/trinity/.ssh/authorized_keys by SetupTrinityUser.sh
+
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH03iBmZbsrowiDevzvwVRafx5QZ+12hk/8BSmwGoTAU herbertm@impro.net
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINXd9tCN1prRdQ3tZonyDIglYcphvjMPGNNqlzz/EB61 mariusr@impro.net

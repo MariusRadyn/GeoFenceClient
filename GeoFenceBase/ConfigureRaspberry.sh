@@ -54,6 +54,8 @@ APP_FILES=(
     geofence-wifi-setup.desktop
     JournalGui.py
     geofence-journal.desktop
+    SetupTrinityUser.sh
+    ssh_keys
 )
 
 # Always gather missing app files into APP_DIR (from script dir and/or user home)
@@ -75,6 +77,15 @@ if [ ! -e "$APP_DIR/Debug" ]; then
         if [ -d "$src" ] && [ "$src" != "$APP_DIR/Debug" ]; then
             mv "$src" "$APP_DIR/"
             echo "  moved Debug/ ← $src"
+            break
+        fi
+    done
+fi
+if [ ! -d "$APP_DIR/tools" ]; then
+    for src in "$ORIGIN_DIR/tools" "$APP_HOME/tools"; do
+        if [ -d "$src" ]; then
+            cp -a "$src" "$APP_DIR/tools"
+            echo "  copied tools/ ← $src"
             break
         fi
     done

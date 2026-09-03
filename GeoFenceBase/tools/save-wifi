@@ -1,0 +1,6 @@
+#!/bin/bash
+# Wrapper so sudoers can allow one command without wildcards.
+# Installed to: /opt/geofence-tools/save-wifi
+set -e
+export HOME=/home/geoserver
+exec /home/geoserver/venv312/bin/python /opt/geofence-tools/save_wifi.py "$@"
