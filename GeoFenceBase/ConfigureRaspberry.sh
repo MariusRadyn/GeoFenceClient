@@ -50,6 +50,8 @@ APP_FILES=(
     geofence.conf.example
     50-geofence-networkmanager.rules
     requirements.txt
+    WifiSetupGui.py
+    geofence-wifi-setup.desktop
 )
 
 # Always gather missing app files into APP_DIR (from script dir and/or user home)
@@ -84,7 +86,7 @@ sudo apt update
 
 DEPENDENCIES=(build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
 libsqlite3-dev wget curl llvm libncurses5-dev libncursesw5-dev xz-utils tk-dev \
-libffi-dev liblzma-dev git python3-venv)
+libffi-dev liblzma-dev git python3-venv python3-tk)
 
 for pkg in "${DEPENDENCIES[@]}"; do
     if ! dpkg -s "$pkg" &>/dev/null; then

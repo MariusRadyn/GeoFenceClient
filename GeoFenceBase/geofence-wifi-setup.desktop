@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=GeoFence WiFi Setup
+Comment=Enter WiFi credentials for GeoFence Base and restart the service
+Exec=PLACEHOLDER_PYTHON PLACEHOLDER_APP_DIR/WifiSetupGui.py
+Path=PLACEHOLDER_APP_DIR
+Icon=network-wireless
+Terminal=false
+Categories=Network;Settings;
+StartupNotify=true

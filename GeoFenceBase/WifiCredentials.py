@@ -33,31 +33,50 @@ def generate_key():
         os.chmod(KEY_FILE, 0o600)
     else:
         printDebug("Encryption key already exists.", cfg.PRINT_DEBUG_GENERAL)
+def list_wifi_ssids(rescan: bool = True):
+    """Return unique SSIDs from nmcli (strongest signal first when available)."""
+    if rescan:
+        subprocess.run(
+            ["nmcli", "dev", "wifi", "rescan"],
+            capture_output=True, text=True, timeout=20,
+        )
+    result = subprocess.run(
+        ["nmcli", "-t", "-f", "SSID,SIGNAL", "dev", "wifi", "list"],
+        capture_output=True, text=True, timeout=30,
+    )
+    best = {}  # ssid -> signal
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(":")
+        ssid = parts[0].strip()
+        if not ssid:
+            continue
+        try:
+            signal = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        except (ValueError, IndexError):
+            signal = 0
+        if ssid not in best or signal > best[ssid]:
+            best[ssid] = signal
+    return sorted(best.keys(), key=lambda s: best[s], reverse=True)
+
+
 def select_wifi():
     # Interactive --newcreds UI: always show (not gated by debug flags)
-    printDebug("Scanning saved WiFi connections...", True)
-    result = subprocess.run(["nmcli", "-t", "-f", "SSID,SIGNAL", "dev", "wifi","list"],
-                            capture_output=True, text=True)
-
-    lines = [l for l in result.stdout.splitlines() if l.strip() != ""]
-
-    if not lines:
+    printDebug("Scanning WiFi networks...", True)
+    ssids = list_wifi_ssids()
+    if not ssids:
         printDebug("No Wi-Fi networks found.", cfg.PRINT_DEBUG_ERROR)
         return None
 
     printDebug("\nSelect WiFi network:", True)
-    ssids = []
-    index = 0
-
-    for _, line in enumerate(lines):
-        ssid = line.split(":")[0]
-        if ssid and ssid not in ssids:
-            ssids.append(ssid)
-            printDebug(f"[{index}] {ssid}", True)
-            index += 1
+    for index, ssid in enumerate(ssids):
+        printDebug(f"[{index}] {ssid}", True)
 
     index = int(input("Enter number: "))
     return ssids[index]
+
+
 def enter_credentials():
     ssid = select_wifi()
     if ssid is None:
@@ -66,6 +85,30 @@ def enter_credentials():
     password = getpass(f"Enter password for WiFi '{ssid}': ")
     data = json.dumps({"ssid": ssid, "password": password}).encode()
     return data
+
+
+def save_new_credentials(ssid: str, password: str) -> bool:
+    """
+    Verify WiFi join, then encrypt+save the same way as --newcreds.
+    Returns True only when verified and written.
+    """
+    ssid = (ssid or "").strip()
+    if not ssid:
+        printDebug("WiFi save failed: empty SSID", cfg.PRINT_DEBUG_ERROR)
+        return False
+
+    create_secure_dir()
+    generate_key()
+
+    if not verify_wifi_credentials(ssid, password or ""):
+        printDebug("Credentials incorrect or WiFi not available — not saved.", cfg.PRINT_DEBUG_ERROR)
+        return False
+
+    data = json.dumps({"ssid": ssid, "password": password or ""}).encode()
+    write_credentials_file(data)
+    cfg.clear_newcreds()
+    printDebug(f"WiFi credentials saved for '{ssid}'", True)
+    return True
 
 
 def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0", quiet=False):
