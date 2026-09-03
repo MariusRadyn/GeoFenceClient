@@ -52,6 +52,8 @@ APP_FILES=(
     requirements.txt
     WifiSetupGui.py
     geofence-wifi-setup.desktop
+    JournalGui.py
+    geofence-journal.desktop
 )
 
 # Always gather missing app files into APP_DIR (from script dir and/or user home)

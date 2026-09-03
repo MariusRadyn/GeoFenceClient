@@ -27,6 +27,7 @@ if [ "$SCRIPT_DIR" != "$APP_DIR" ]; then
         MqttService.py SqlLite.py ConfigureRaspberry.sh InstallService.sh
         geofence.service geofence.conf.example 50-geofence-networkmanager.rules
         requirements.txt WifiSetupGui.py geofence-wifi-setup.desktop
+        JournalGui.py geofence-journal.desktop
     )
     echo "Moving app files into $APP_DIR ..."
     for f in "${APP_FILES[@]}"; do
@@ -110,35 +111,36 @@ echo "$APP_USER ALL=(ALL) NOPASSWD: /bin/systemctl restart $SERVICE_NAME, /bin/s
 sudo chmod 440 "$SUDOERS_FILE"
 sudo visudo -cf "$SUDOERS_FILE" >/dev/null
 
-# Desktop icon for WiFi Setup GUI
-DESKTOP_SRC="$APP_DIR/geofence-wifi-setup.desktop"
+# Desktop icons (WiFi setup + journal viewer)
 DESKTOP_DIR="${APP_HOME}/Desktop"
 APPS_DIR="${APP_HOME}/.local/share/applications"
 mkdir -p "$DESKTOP_DIR" "$APPS_DIR"
-if [ -f "$DESKTOP_SRC" ]; then
+for desk_name in geofence-wifi-setup.desktop geofence-journal.desktop; do
+    DESKTOP_SRC="$APP_DIR/$desk_name"
+    if [ ! -f "$DESKTOP_SRC" ]; then
+        echo "WARNING: $DESKTOP_SRC not found — skip desktop icon."
+        continue
+    fi
     sed -i 's/\r$//' "$DESKTOP_SRC" 2>/dev/null || true
     TMP_DESKTOP="$(mktemp)"
     sed \
         -e "s|PLACEHOLDER_PYTHON|${VENV_PYTHON}|g" \
         -e "s|PLACEHOLDER_APP_DIR|${APP_DIR}|g" \
         "$DESKTOP_SRC" > "$TMP_DESKTOP"
-    cp "$TMP_DESKTOP" "$DESKTOP_DIR/geofence-wifi-setup.desktop"
-    cp "$TMP_DESKTOP" "$APPS_DIR/geofence-wifi-setup.desktop"
+    cp "$TMP_DESKTOP" "$DESKTOP_DIR/$desk_name"
+    cp "$TMP_DESKTOP" "$APPS_DIR/$desk_name"
     rm -f "$TMP_DESKTOP"
-    chmod +x "$DESKTOP_DIR/geofence-wifi-setup.desktop" "$APPS_DIR/geofence-wifi-setup.desktop"
-    chown "$APP_USER:$APP_USER" "$DESKTOP_DIR/geofence-wifi-setup.desktop" "$APPS_DIR/geofence-wifi-setup.desktop"
-    # Mark trusted on Raspberry Pi OS / LXDE / GNOME so double-click works
+    chmod +x "$DESKTOP_DIR/$desk_name" "$APPS_DIR/$desk_name"
+    chown "$APP_USER:$APP_USER" "$DESKTOP_DIR/$desk_name" "$APPS_DIR/$desk_name"
     if command -v gio >/dev/null 2>&1; then
-        sudo -u "$APP_USER" gio set "$DESKTOP_DIR/geofence-wifi-setup.desktop" metadata::trusted true 2>/dev/null || true
+        sudo -u "$APP_USER" gio set "$DESKTOP_DIR/$desk_name" metadata::trusted true 2>/dev/null || true
     fi
-    echo "  Desktop icon: $DESKTOP_DIR/geofence-wifi-setup.desktop"
-else
-    echo "WARNING: $DESKTOP_SRC not found — skip desktop icon."
-fi
+    echo "  Desktop icon: $DESKTOP_DIR/$desk_name"
+done
 
-# tkinter for WifiSetupGui (system package; pyenv builds need tk-dev which ConfigureRaspberry installs)
+# tkinter for desktop GUIs
 if ! dpkg -s python3-tk &>/dev/null; then
-    echo "Installing python3-tk for WiFi Setup GUI..."
+    echo "Installing python3-tk for GeoFence GUIs..."
     sudo apt install -y python3-tk || true
 fi
 
@@ -150,7 +152,7 @@ echo "Service installed and enabled for boot."
 echo "  App:     $APP_DIR"
 echo "  Config:  $CONFIG_FILE"
 echo "  Unit:    $SERVICE_DEST"
-echo "  WiFi UI: $DESKTOP_DIR/geofence-wifi-setup.desktop"
+echo "  Desktop: GeoFence WiFi Setup, GeoFence Journal"
 echo ""
 echo "Edit config, then:"
 echo "  sudo systemctl start $SERVICE_NAME"
@@ -160,3 +162,4 @@ echo ""
 echo "NOTE: \"newcreds\": true is one-shot — after WiFi creds are saved it is"
 echo "set back to false in $CONFIG_FILE automatically."
 echo "Desktop: use \"GeoFence WiFi Setup\" instead of --newcreds."
+echo "Desktop: use \"GeoFence Journal\" for live logs."
