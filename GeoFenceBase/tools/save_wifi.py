@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Privileged WiFi helper for GeoFence (run via sudo as root only).
+Privileged WiFi helper — SOURCE COPY for developers.
 
-Used by /opt/geofence-tools/WifiSetupGui.py so user "trinity" never needs
-read access to /home/geoserver/GeoFenceBase.
+Runtime install path (trinity / sudo):
+  /opt/geofence-tools/save_wifi.py
+
+Installed by SetupTrinityUser.sh. Do NOT rely on this file under
+/home/geoserver/GeoFenceBase/tools — trinity cannot read GeoFenceBase.
 
 Commands:
   save_wifi.py --list
@@ -20,13 +23,24 @@ import sys
 # Service home / app (readable by root; not by trinity)
 GEOSERVER_HOME = "/home/geoserver"
 APP_DIR = f"{GEOSERVER_HOME}/GeoFenceBase"
-VENV_SITE = None  # unused; we run under venv python
 
 os.environ["HOME"] = GEOSERVER_HOME
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
 import WifiCredentials  # noqa: E402
+
+
+class _StdoutToStderr:
+    """WifiCredentials.printDebug writes to stdout — keep stdout JSON-only."""
+
+    def __enter__(self):
+        self._out = sys.stdout
+        sys.stdout = sys.stderr
+        return self
+
+    def __exit__(self, *args):
+        sys.stdout = self._out
 
 
 def main() -> int:
@@ -36,7 +50,8 @@ def main() -> int:
 
     if "--list" in sys.argv:
         try:
-            ssids = WifiCredentials.list_wifi_ssids(rescan=True)
+            with _StdoutToStderr():
+                ssids = WifiCredentials.list_wifi_ssids(rescan=True)
         except Exception as e:
             print(json.dumps({"ok": False, "error": str(e)}))
             return 1
@@ -46,8 +61,9 @@ def main() -> int:
     if "--show-ssid" in sys.argv:
         ssid = ""
         try:
-            if os.path.exists(WifiCredentials.DATA_FILE):
-                ssid = WifiCredentials.read_credentials_file().get("ssid", "") or ""
+            with _StdoutToStderr():
+                if os.path.exists(WifiCredentials.DATA_FILE):
+                    ssid = WifiCredentials.read_credentials_file().get("ssid", "") or ""
         except Exception as e:
             print(json.dumps({"ok": False, "error": str(e), "ssid": ""}))
             return 1
@@ -69,7 +85,8 @@ def main() -> int:
         return 1
 
     try:
-        ok = WifiCredentials.save_new_credentials(ssid, password)
+        with _StdoutToStderr():
+            ok = WifiCredentials.save_new_credentials(ssid, password)
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         return 1

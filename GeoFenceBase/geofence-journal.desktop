@@ -1,11 +1,8 @@
 [Desktop Entry]
-Version=1.0
 Type=Application
-Name=GeoFence Journal
-Comment=Live journalctl log for the GeoFence service
-Exec=PLACEHOLDER_PYTHON PLACEHOLDER_TOOLS_DIR/JournalGui.py
-Path=PLACEHOLDER_TOOLS_DIR
+Name=Service Monitor
+Exec=/opt/geofence-tools/run-journal.sh
+TryExec=/opt/geofence-tools/run-journal.sh
 Icon=utilities-system-monitor
 Terminal=false
-Categories=System;Monitor;
 StartupNotify=true

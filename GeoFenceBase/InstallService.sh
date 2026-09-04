@@ -28,6 +28,7 @@ if [ "$SCRIPT_DIR" != "$APP_DIR" ]; then
         geofence.service geofence.conf.example 50-geofence-networkmanager.rules
         requirements.txt WifiSetupGui.py geofence-wifi-setup.desktop
         JournalGui.py geofence-journal.desktop SetupTrinityUser.sh ssh_keys
+        "Trinity 3D.png"
     )
     echo "Moving app files into $APP_DIR ..."
     for f in "${APP_FILES[@]}"; do
@@ -36,6 +37,8 @@ if [ "$SCRIPT_DIR" != "$APP_DIR" ]; then
             echo "  moved $f"
         fi
     done
+    # Do NOT install customer tools under APP_DIR — trinity cannot read it.
+    # SetupTrinityUser.sh installs GUIs + save-wifi to /opt/geofence-tools only.
 fi
 
 if [ ! -x "$VENV_PYTHON" ]; then
@@ -152,7 +155,7 @@ echo "Service installed and enabled for boot."
 echo "  App:     $APP_DIR"
 echo "  Config:  $CONFIG_FILE"
 echo "  Unit:    $SERVICE_DEST"
-echo "  Desktop: GeoFence WiFi Setup, GeoFence Journal"
+echo "  Desktop: Set Wifi Credentials, Service Monitor"
 echo ""
 echo "Edit config, then:"
 echo "  sudo systemctl start $SERVICE_NAME"
@@ -161,8 +164,8 @@ echo "  journalctl -u $SERVICE_NAME -f"
 echo ""
 echo "NOTE: \"newcreds\": true is one-shot — after WiFi creds are saved it is"
 echo "set back to false in $CONFIG_FILE automatically."
-echo "Desktop: use \"GeoFence WiFi Setup\" instead of --newcreds."
-echo "Desktop: use \"GeoFence Journal\" for live logs."
+echo "Desktop: use \"Set Wifi Credentials\" instead of --newcreds."
+echo "Desktop: use \"Service Monitor\" for live logs."
 echo ""
 echo "Lock down for customer user 'trinity' (SSH keys from ssh_keys file):"
 echo "  edit $APP_DIR/ssh_keys   # one public key per line"

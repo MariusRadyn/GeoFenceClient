@@ -56,6 +56,7 @@ APP_FILES=(
     geofence-journal.desktop
     SetupTrinityUser.sh
     ssh_keys
+    "Trinity 3D.png"
 )
 
 # Always gather missing app files into APP_DIR (from script dir and/or user home)
@@ -81,15 +82,8 @@ if [ ! -e "$APP_DIR/Debug" ]; then
         fi
     done
 fi
-if [ ! -d "$APP_DIR/tools" ]; then
-    for src in "$ORIGIN_DIR/tools" "$APP_HOME/tools"; do
-        if [ -d "$src" ]; then
-            cp -a "$src" "$APP_DIR/tools"
-            echo "  copied tools/ ← $src"
-            break
-        fi
-    done
-fi
+# tools/ is NOT installed under GeoFenceBase — trinity cannot read that tree.
+# Customer GUIs + save-wifi live only in /opt/geofence-tools (SetupTrinityUser.sh).
 
 SCRIPT_DIR="$APP_DIR"
 

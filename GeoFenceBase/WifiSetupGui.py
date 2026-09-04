@@ -21,6 +21,37 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_WIFI = os.path.join(TOOLS_DIR, "save-wifi")
 
 
+def _parse_json_payload(text: str) -> dict | None:
+    """Parse JSON from helper output; ignore leading debug lines on stdout."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        pass
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            continue
+    start = text.rfind("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            data = json.loads(text[start : end + 1])
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
 def _run_save_wifi(args: list[str], stdin_text: str | None = None) -> tuple[bool, dict]:
     cmd = ["sudo", "-n", SAVE_WIFI, *args]
     try:
@@ -35,15 +66,18 @@ def _run_save_wifi(args: list[str], stdin_text: str | None = None) -> tuple[bool
         return False, {"error": str(e)}
 
     out = (result.stdout or "").strip()
-    try:
-        data = json.loads(out) if out else {}
-    except json.JSONDecodeError:
-        err = out or (result.stderr or "").strip() or f"exit {result.returncode}"
-        return False, {"error": err}
+    err_text = (result.stderr or "").strip()
+    data = _parse_json_payload(out) or _parse_json_payload(err_text)
 
-    if result.returncode != 0 or not data.get("ok"):
-        return False, data if data else {"error": (result.stderr or out or "failed")}
-    return True, data
+    if data is None:
+        return False, {"error": out or err_text or f"exit {result.returncode}"}
+
+    # Prefer JSON "ok" — helpers may print debug lines before the JSON
+    if data.get("ok"):
+        return True, data
+    return False, data if data.get("error") else {
+        "error": data.get("error") or err_text or out or "failed"
+    }
 
 
 def restart_geofence_service() -> tuple[bool, str]:
@@ -65,7 +99,7 @@ def restart_geofence_service() -> tuple[bool, str]:
 class WifiSetupApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("GeoFence WiFi Setup")
+        self.title("Set Wifi Credentials")
         self.geometry("460x320")
         self.minsize(420, 300)
         self.resizable(True, True)

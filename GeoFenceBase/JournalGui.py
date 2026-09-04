@@ -29,7 +29,7 @@ MAX_LINES = 5000  # keep UI responsive
 class JournalGui(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f"GeoFence Journal — {SERVICE_NAME}")
+        self.title(f"Service Monitor — {SERVICE_NAME}")
         self.geometry("900x560")
         self.minsize(640, 400)
 

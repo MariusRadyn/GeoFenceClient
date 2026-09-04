@@ -1,6 +1,6 @@
 #!/bin/bash
-# Wrapper so sudoers can allow one command without wildcards.
-# Installed to: /opt/geofence-tools/save-wifi
+# SOURCE COPY — runtime is /opt/geofence-tools/save-wifi (SetupTrinityUser.sh).
+# Not used from GeoFenceBase/tools on the Pi (trinity cannot read that tree).
 set -e
 export HOME=/home/geoserver
 exec /home/geoserver/venv312/bin/python /opt/geofence-tools/save_wifi.py "$@"
