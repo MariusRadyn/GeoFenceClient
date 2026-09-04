@@ -290,6 +290,158 @@ exec ${VENV_PYTHON} ${TOOLS_DIR}/save_wifi.py "\$@"
 EOF
 echo "  save-wifi → $TOOLS_DIR/save-wifi"
 
+# Verbose / config helper for Service Monitor
+SC_SRC=""
+for d in "$SCRIPT_DIR/tools" "$APP_DIR/tools"; do
+    if [ -f "$d/service_config.py" ]; then
+        SC_SRC="$d/service_config.py"
+        break
+    fi
+done
+if [ -n "$SC_SRC" ]; then
+    sed -i 's/\r$//' "$SC_SRC" 2>/dev/null || true
+    cp "$SC_SRC" "$TOOLS_DIR/service_config.py"
+    echo "  service_config.py ← $SC_SRC"
+else
+    echo "  writing built-in service_config.py → $TOOLS_DIR"
+    cat > "$TOOLS_DIR/service_config.py" <<'PY'
+#!/usr/bin/env python3
+"""Privileged geofence.conf helper (run via sudo as root only)."""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+
+GEOSERVER_HOME = "/home/geoserver"
+CONFIG_FILE = f"{GEOSERVER_HOME}/Secure/geofence.conf"
+SERVICE_NAME = "geofence"
+DEFAULTS = {
+    "wifi": False,
+    "verbose": False,
+    "mqtt": False,
+    "newcreds": False,
+}
+
+
+def _load() -> dict:
+    cfg = dict(DEFAULTS)
+    if not os.path.exists(CONFIG_FILE):
+        return cfg
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for key in DEFAULTS:
+                if key in data:
+                    cfg[key] = bool(data[key])
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": f"read config: {e}"}))
+        sys.exit(1)
+    return cfg
+
+
+def _save(cfg: dict) -> None:
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    tmp = CONFIG_FILE + ".tmp"
+    out = {k: bool(cfg.get(k, DEFAULTS[k])) for k in DEFAULTS}
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, CONFIG_FILE)
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+        import pwd
+        st = pwd.getpwnam("geoserver")
+        os.chown(CONFIG_FILE, st.pw_uid, st.pw_gid)
+    except Exception:
+        pass
+
+
+def _parse_bool(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if t in ("1", "true", "on", "yes", "y"):
+        return True
+    if t in ("0", "false", "off", "no", "n"):
+        return False
+    raise ValueError(f"expected on/off, got {text!r}")
+
+
+def _restart() -> tuple[bool, str]:
+    try:
+        r = subprocess.run(
+            ["systemctl", "restart", SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception as e:
+        return False, str(e)
+    if r.returncode == 0:
+        return True, "restarted"
+    return False, (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        print("ERROR: must run as root (via sudo)", file=sys.stderr)
+        return 2
+
+    if "--get-verbose" in sys.argv:
+        cfg = _load()
+        print(json.dumps({"ok": True, "verbose": bool(cfg.get("verbose"))}))
+        return 0
+
+    if "--set-verbose" in sys.argv:
+        try:
+            idx = sys.argv.index("--set-verbose")
+            raw = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ""
+            value = _parse_bool(raw)
+        except (ValueError, IndexError) as e:
+            print(json.dumps({"ok": False, "error": str(e)}))
+            return 1
+        cfg = _load()
+        cfg["verbose"] = value
+        try:
+            _save(cfg)
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": f"write config: {e}"}))
+            return 1
+        restart = "--no-restart" not in sys.argv
+        restart_ok = True
+        restart_msg = "skipped"
+        if restart:
+            restart_ok, restart_msg = _restart()
+        print(json.dumps({
+            "ok": True,
+            "verbose": value,
+            "restart_ok": restart_ok,
+            "restart": restart_msg,
+        }))
+        return 0 if restart_ok else 1
+
+    print(json.dumps({
+        "ok": False,
+        "error": "usage: --get-verbose | --set-verbose on|off [--no-restart]",
+    }))
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PY
+fi
+cat > "$TOOLS_DIR/service-config" <<EOF
+#!/bin/bash
+set -e
+export HOME=/home/${SERVICE_USER}
+exec ${VENV_PYTHON} ${TOOLS_DIR}/service_config.py "\$@"
+EOF
+chmod 755 "$TOOLS_DIR/service-config"
+chmod 644 "$TOOLS_DIR/service_config.py"
+echo "  service-config → $TOOLS_DIR/service-config"
+
 # Optional: remove leftover tools/ under APP_DIR so it is not confused with runtime
 if [ -d "$APP_DIR/tools" ]; then
     rm -rf "$APP_DIR/tools"
@@ -298,8 +450,8 @@ fi
 
 chmod 755 "$TOOLS_DIR"
 chmod 755 "$TOOLS_DIR/WifiSetupGui.py" "$TOOLS_DIR/JournalGui.py"
-chmod 755 "$TOOLS_DIR/save-wifi"
-chmod 644 "$TOOLS_DIR/save_wifi.py"
+chmod 755 "$TOOLS_DIR/save-wifi" "$TOOLS_DIR/service-config"
+chmod 644 "$TOOLS_DIR/save_wifi.py" "$TOOLS_DIR/service_config.py"
 chown -R root:root "$TOOLS_DIR"
 
 if ! dpkg -s python3-tk &>/dev/null; then
@@ -335,7 +487,9 @@ cat > "$SUDOERS" <<EOF
 # GeoFence customer — passwordless start/stop/restart/status + WiFi save helper
 Cmnd_Alias GEOFENCE_CTL = /bin/systemctl start ${SERVICE_NAME}, /bin/systemctl stop ${SERVICE_NAME}, /bin/systemctl restart ${SERVICE_NAME}, /bin/systemctl status ${SERVICE_NAME}
 Cmnd_Alias GEOFENCE_WIFI = ${TOOLS_DIR}/save-wifi
-${CUSTOMER_USER} ALL=(root) NOPASSWD: GEOFENCE_CTL, GEOFENCE_WIFI
+# Read verbose without password; changing verbose requires admin auth via pkexec
+Cmnd_Alias GEOFENCE_CFG_GET = ${TOOLS_DIR}/service-config --get-verbose
+${CUSTOMER_USER} ALL=(root) NOPASSWD: GEOFENCE_CTL, GEOFENCE_WIFI, GEOFENCE_CFG_GET
 EOF
 chmod 440 "$SUDOERS"
 visudo -cf "$SUDOERS"

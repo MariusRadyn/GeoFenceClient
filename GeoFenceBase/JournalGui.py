@@ -11,8 +11,10 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 import queue
+import shutil
 import signal
 import subprocess
 import sys
@@ -24,6 +26,72 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 SERVICE_NAME = "geofence"
 VENV_PYTHON = os.path.expanduser("~/venv312/bin/python")
 MAX_LINES = 5000  # keep UI responsive
+TOOLS_DIR = "/opt/geofence-tools"
+SERVICE_CONFIG = os.path.join(TOOLS_DIR, "service-config")
+
+
+def _parse_json_payload(text: str) -> dict | None:
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        pass
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _run_service_config(
+    args: list[str], *, ask_password: bool = False
+) -> tuple[bool, dict]:
+    """
+    ask_password=False → sudo -n (NOPASSWD --get-verbose only).
+    ask_password=True  → pkexec GUI admin password (or sudo -S fallback).
+    """
+    if ask_password:
+        if shutil.which("pkexec"):
+            cmd = ["pkexec", SERVICE_CONFIG, *args]
+        else:
+            # Fallback if pkexec missing: prompt in Tk then sudo -S
+            return False, {
+                "error": "pkexec not found — install policykit-1, or re-run SetupTrinityUser.sh"
+            }
+    else:
+        cmd = ["sudo", "-n", SERVICE_CONFIG, *args]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return False, {"error": "timed out waiting for authentication"}
+    except Exception as e:
+        return False, {"error": str(e)}
+
+    out = (result.stdout or "").strip()
+    err = (result.stderr or "").strip()
+    data = _parse_json_payload(out) or _parse_json_payload(err) or {}
+    if data.get("ok"):
+        return True, data
+    if result.returncode in (126, 127) or "dismissed" in err.lower() or "cancelled" in err.lower():
+        return False, {"error": "Authentication cancelled"}
+    if not data:
+        data = {"error": out or err or f"exit {result.returncode}"}
+    return False, data
 
 
 class JournalGui(tk.Tk):
@@ -40,11 +108,13 @@ class JournalGui(tk.Tk):
         self._paused = False
         self._autoscroll = tk.BooleanVar(value=True)
         self._boot_only = tk.BooleanVar(value=True)
+        self._verbose = False
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self.start_follow)
         self.after(80, self._drain_queue)
+        self.after(150, self._refresh_verbose_state)
 
     def _build_ui(self):
         top = ttk.Frame(self, padding=(8, 8, 8, 4))
@@ -61,6 +131,9 @@ class JournalGui(tk.Tk):
 
         self.btn_restart = ttk.Button(top, text="Restart Service", command=self.restart_service)
         self.btn_restart.pack(side=tk.LEFT, padx=4)
+
+        self.btn_verbose = ttk.Button(top, text="Verbose: …", command=self.toggle_verbose)
+        self.btn_verbose.pack(side=tk.LEFT, padx=4)
 
         ttk.Checkbutton(
             top, text="This boot only (-b)", variable=self._boot_only, command=self._on_options_changed
@@ -217,6 +290,66 @@ class JournalGui(tk.Tk):
         self._reader_thread = None
         if self.status_var.get().startswith("Following"):
             self.status_var.set("Stopped")
+
+    def _update_verbose_button(self):
+        self.btn_verbose.config(text=f"Verbose: {'ON' if self._verbose else 'OFF'}")
+
+    def _refresh_verbose_state(self):
+        def work():
+            ok, data = _run_service_config(["--get-verbose"])
+            verbose = bool(data.get("verbose")) if ok else False
+            err = "" if ok else (data.get("error") or "could not read verbose")
+            self.after(0, lambda: self._on_verbose_state(ok, verbose, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_verbose_state(self, ok: bool, verbose: bool, err: str):
+        if ok:
+            self._verbose = verbose
+            self._update_verbose_button()
+        else:
+            self.btn_verbose.config(text="Verbose: ?")
+            self.status_var.set(f"Verbose status unavailable: {err}")
+
+    def toggle_verbose(self):
+        new_val = not self._verbose
+        label = "ON" if new_val else "OFF"
+        if not messagebox.askyesno(
+            "Toggle verbose",
+            f"Turn verbose logging {label}?\n\n"
+            f"This updates geofence.conf and restarts {SERVICE_NAME}.\n"
+            f"You will be asked for an administrator password.",
+        ):
+            return
+        self.btn_verbose.config(state=tk.DISABLED)
+        self.status_var.set(f"Authenticate to set verbose {label}…")
+
+        def work():
+            ok, data = _run_service_config(
+                ["--set-verbose", "on" if new_val else "off"],
+                ask_password=True,
+            )
+            err = "" if ok else (data.get("error") or data.get("restart") or "failed")
+            verbose = bool(data.get("verbose", new_val)) if ok else self._verbose
+            self.after(0, lambda: self._on_verbose_toggled(ok, verbose, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_verbose_toggled(self, ok: bool, verbose: bool, err: str):
+        self.btn_verbose.config(state=tk.NORMAL)
+        if ok:
+            self._verbose = verbose
+            self._update_verbose_button()
+            self.status_var.set(f"Verbose {'ON' if verbose else 'OFF'} — following…")
+            self.start_follow()
+        else:
+            self.status_var.set("Verbose toggle failed")
+            messagebox.showerror(
+                "Verbose toggle failed",
+                err
+                or "Authentication failed or was cancelled.\n"
+                "Use the geoserver (admin) password when prompted.",
+            )
 
     def restart_service(self):
         if not messagebox.askyesno("Restart service", f"Restart {SERVICE_NAME}.service now?"):

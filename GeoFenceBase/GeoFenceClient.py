@@ -1707,10 +1707,20 @@ async def main():
                     else:
                         casePtr += 1
                         printDebug(f"Service Running on WIFI: {IP_ADDRESS}", True)
+                        printDebug(f"Connected IP: {IP_ADDRESS}", True)
                 else:
-                   printDebug(f"Service Running on LAN: {IP_ADDRESS}", True)
                    IP_ADDRESS = get_local_ip_address(INTERFACE_ETH)
-                   casePtr+=1
+                   if not IP_ADDRESS or IP_ADDRESS == "0.0.0.0":
+                       printDebug(
+                           "LAN not available — will not continue until connected",
+                           cfg.PRINT_DEBUG_ERROR,
+                       )
+                       await asyncio.sleep(5)
+                       # Stay on case 1
+                   else:
+                       printDebug(f"Service Running on LAN: {IP_ADDRESS}", True)
+                       printDebug(f"Connected IP: {IP_ADDRESS}", True)
+                       casePtr+=1
             
             # Save IP to Firestore + start cloud listeners (needs network)
             case 2:

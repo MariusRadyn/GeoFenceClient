@@ -1,0 +1,5 @@
+#!/bin/bash
+# SOURCE COPY — runtime is /opt/geofence-tools/service-config (SetupTrinityUser.sh).
+set -e
+export HOME=/home/geoserver
+exec /home/geoserver/venv312/bin/python /opt/geofence-tools/service_config.py "$@"
