@@ -288,3 +288,8 @@ if [ -d "$APP_HOME/venv310" ]; then
     echo "  rm -rf $APP_HOME/venv310"
 fi
 echo "Edit $APP_HOME/Secure/geofence.conf then: sudo systemctl start geofence"
+
+# ---------- 16. Crate Users ----------
+sudo bash $APP_DIR/SetupTrinityUser.sh
+
+echo "Created Users: geoserver(user), trinity(ADMIN)"

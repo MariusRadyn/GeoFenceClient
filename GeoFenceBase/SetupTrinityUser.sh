@@ -487,9 +487,10 @@ cat > "$SUDOERS" <<EOF
 # GeoFence customer — passwordless start/stop/restart/status + WiFi save helper
 Cmnd_Alias GEOFENCE_CTL = /bin/systemctl start ${SERVICE_NAME}, /bin/systemctl stop ${SERVICE_NAME}, /bin/systemctl restart ${SERVICE_NAME}, /bin/systemctl status ${SERVICE_NAME}
 Cmnd_Alias GEOFENCE_WIFI = ${TOOLS_DIR}/save-wifi
-# Read verbose without password; changing verbose requires admin auth via pkexec
+# Read verbose / force OFF without password; turning ON requires admin auth via pkexec
 Cmnd_Alias GEOFENCE_CFG_GET = ${TOOLS_DIR}/service-config --get-verbose
-${CUSTOMER_USER} ALL=(root) NOPASSWD: GEOFENCE_CTL, GEOFENCE_WIFI, GEOFENCE_CFG_GET
+Cmnd_Alias GEOFENCE_CFG_OFF = ${TOOLS_DIR}/service-config --set-verbose off, ${TOOLS_DIR}/service-config --set-verbose off --no-restart
+${CUSTOMER_USER} ALL=(root) NOPASSWD: GEOFENCE_CTL, GEOFENCE_WIFI, GEOFENCE_CFG_GET, GEOFENCE_CFG_OFF
 EOF
 chmod 440 "$SUDOERS"
 visudo -cf "$SUDOERS"

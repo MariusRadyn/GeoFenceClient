@@ -27,6 +27,7 @@ def _resolve_secure_dir() -> str:
 
 SECURE_DIR = _resolve_secure_dir()
 MQTT_CREDS_FILE = os.path.join(SECURE_DIR, "mqtt_credentials.json")
+MQTT_WSS_HOST_FILE = os.path.join(SECURE_DIR, "mqtt_wss_host.txt")
 MOSQUITTO_PASSWD = "/etc/mosquitto/passwd"
 MOSQUITTO_ACL = "/etc/mosquitto/acl"
 MOSQUITTO_CONF_D = "/etc/mosquitto/conf.d/geofence.conf"
@@ -41,6 +42,7 @@ MQTT_USER_ANDROID = "android"
 # JSON field names sent to Android / IoT in MQTT payloads and Firestore clients doc
 MQTT_PAYLOAD_USER = "mqttUser"
 MQTT_PAYLOAD_PW = "mqttPw"
+FIRE_MQTT_WSS_HOST = "mqttWssHost"
 
 FIRE_COLLECT_CLIENTS = "clients"
 SERVICE_ACCOUNT_KEY = os.path.join(_resolve_secure_dir(), "ServiceAccountKey.json")
@@ -81,6 +83,7 @@ topic write mqtt/from/iot
 topic write mqtt/from/iot/#
 
 user android
+topic read mqtt/to/android
 topic read mqtt/to/android/#
 topic write mqtt/from/android
 """
@@ -124,6 +127,37 @@ def get_role_credentials(role: str) -> tuple[str, str]:
         return "", ""
     entry = creds.get(role, {})
     return entry.get("username", ""), entry.get("password", "")
+def get_mqtt_wss_host() -> str:
+    """Cloudflare (or other) public hostname for browser WSS — empty if unset."""
+    try:
+        if not os.path.exists(MQTT_WSS_HOST_FILE):
+            return ""
+        with open(MQTT_WSS_HOST_FILE, "r", encoding="utf-8") as f:
+            host = (f.read() or "").strip()
+        # Strip scheme/path if someone pasted a full URL
+        host = host.replace("https://", "").replace("http://", "")
+        host = host.replace("wss://", "").replace("ws://", "")
+        host = host.split("/")[0].strip()
+        if host.endswith(":443"):
+            host = host[:-4]
+        return host
+    except Exception:
+        return ""
+
+
+def set_mqtt_wss_host(host: str) -> bool:
+    host = (host or "").strip()
+    if not host:
+        return False
+    _ensure_secure_dir()
+    tmp = MQTT_WSS_HOST_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(host + "\n")
+    os.replace(tmp, MQTT_WSS_HOST_FILE)
+    os.chmod(MQTT_WSS_HOST_FILE, 0o600)
+    return True
+
+
 def get_mqtt_payload_for_role(role: str) -> dict:
     """Return {mqttUser, mqttPw} for the given role, or {} if not configured."""
     user, pw = get_role_credentials(role)
@@ -134,13 +168,17 @@ def get_firestore_mqtt_fields() -> dict:
     """Fields to merge into clients/{bt_name} alongside IP address."""
     creds = load_credentials()
     if not creds:
-        return {}
+        fields = {}
+    else:
+        fields = {}
+        android = creds.get("android", {})
+        if android.get("username") and android.get("password"):
+            fields[MQTT_PAYLOAD_USER] = android["username"]
+            fields[MQTT_PAYLOAD_PW] = android["password"]
 
-    fields = {}
-    android = creds.get("android", {})
-    if android.get("username") and android.get("password"):
-        fields[MQTT_PAYLOAD_USER] = android["username"]
-        fields[MQTT_PAYLOAD_PW] = android["password"]
+    wss_host = get_mqtt_wss_host()
+    if wss_host:
+        fields[FIRE_MQTT_WSS_HOST] = wss_host
     return fields
 def _get_bluetooth_alias() -> str:
     try:
@@ -367,11 +405,15 @@ def setup_mosquitto(force_creds: bool = False):
 
     printDebug(f"Mosquitto auth enabled. Credentials: {MQTT_CREDS_FILE}",set.PRINT_DEBUG_MQTT_CREDS)
     printDebug("Roles: base (Pi), iot (devices), android (app/web)", set.PRINT_DEBUG_MQTT_CREDS)
-    printDebug("Listeners: TCP 1883, WS 9001, WSS 9002 (Flutter https)", set.PRINT_DEBUG_MQTT_CREDS)
-    printDebug(
-        "Phone HTTPS app: once open https://<base-ip>:9002 in Chrome and accept the warning, then reconnect.",
-        set.PRINT_DEBUG_MQTT_CREDS,
-    )
+    printDebug("Listeners: TCP 1883, WS 9001, WSS 9002 (LAN fallback)", set.PRINT_DEBUG_MQTT_CREDS)
+    wss = get_mqtt_wss_host()
+    if wss:
+        printDebug(f"Cloudflare MQTT WSS host: wss://{wss}/mqtt", set.PRINT_DEBUG_MQTT_CREDS)
+    else:
+        printDebug(
+            "Optional: run SetupCloudflareTunnel.sh so the HTTPS web app needs no cert click.",
+            set.PRINT_DEBUG_MQTT_CREDS,
+        )
     push_credentials_to_firestore()
 
 def main():
@@ -391,7 +433,33 @@ def main():
         action="store_true",
         help="Print base MQTT username (password not shown)",
     )
+    parser.add_argument(
+        "--push-wss-host",
+        action="store_true",
+        help="Push ~/Secure/mqtt_wss_host.txt to Firestore clients/{bt}.mqttWssHost",
+    )
+    parser.add_argument(
+        "--set-wss-host",
+        metavar="HOST",
+        help="Write Cloudflare hostname to ~/Secure/mqtt_wss_host.txt",
+    )
     args = parser.parse_args()
+
+    if args.set_wss_host:
+        if not set_mqtt_wss_host(args.set_wss_host):
+            printDebug("ERROR: empty host", set.PRINT_DEBUG_FIRESTORE)
+            sys.exit(1)
+        printDebug(f"Saved WSS host: {get_mqtt_wss_host()}", set.PRINT_DEBUG_MQTT_CREDS)
+
+    if args.push_wss_host or args.set_wss_host:
+        ok = push_credentials_to_firestore()
+        if not ok:
+            sys.exit(1)
+        printDebug(
+            f"Firestore mqttWssHost={get_mqtt_wss_host()!r}",
+            set.PRINT_DEBUG_FIRESTORE,
+        )
+        return
 
     if args.setup:
         setup_mosquitto(force_creds=args.force)

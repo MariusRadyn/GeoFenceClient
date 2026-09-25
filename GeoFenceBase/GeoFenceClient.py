@@ -264,10 +264,44 @@ def _rebuild_monitor_list():
     rebuilt = []
     for mons in _monitors_by_base.values():
         rebuilt.extend(mons)
+
+    # Signature so we only log when the set of monitors actually changes
+    # (Firestore on_snapshot also fires on metadata / unrelated field writes).
+    new_sig = tuple(
+        sorted(
+            (
+                m.base_station_doc_id or "",
+                m.mon_doc_id or "",
+                m.mon_device_id or "",
+                m.mon_name or "",
+            )
+            for m in rebuilt
+        )
+    )
+    old_sig = tuple(
+        sorted(
+            (
+                m.base_station_doc_id or "",
+                m.mon_doc_id or "",
+                m.mon_device_id or "",
+                m.mon_name or "",
+            )
+            for m in (MONITOR_DATA_LIST or [])
+        )
+    )
+    changed = new_sig != old_sig
     MONITOR_DATA_LIST = rebuilt
     printDebug(f"\nMonitor Data: {MONITOR_DATA_LIST}\n", cfg.PRINT_DEBUG_MONITOR)
-    if rebuilt:
-        printDebug(f"Monitors loaded from Firestore: {len(rebuilt)}", True)
+    if changed:
+        if rebuilt:
+            printDebug(f"Monitors loaded from Firestore: {len(rebuilt)}", True)
+        else:
+            printDebug("Monitors loaded from Firestore: 0", cfg.PRINT_DEBUG_MONITOR)
+    else:
+        printDebug(
+            f"Monitors snapshot unchanged ({len(rebuilt)}) — skip log",
+            cfg.PRINT_DEBUG_MONITOR,
+        )
 
 def _ingest_monitor_snapshot(doc_snapshot, base_station_doc_id: str):
     """Parse a monitors collection snapshot into cache for one base (or legacy)."""
@@ -535,40 +569,157 @@ def resolve_monitor(payload_monitor_id: str = "", mqtt_from_id: str = "") -> Opt
         if mon:
             return mon
     return None
-def checkWifiConnection(quiet: bool = False):
+def _normalize_ssid(ssid: str | None) -> str:
+    """Normalize SSID for comparison (nmcli escapes ':' as '\\:')."""
+    if not ssid:
+        return ""
+    s = str(ssid).strip().strip('"').strip("'")
+    # nmcli tabular output escapes
+    s = s.replace("\\:", ":").replace("\\\\", "\\")
+    return s
+
+
+def get_connected_wifi_ssid(ifname: str = INTERFACE_WIFI) -> str | None:
+    """
+    Return the SSID the Pi is currently associated with, or None if not connected.
+    Prefers nmcli (reliable under systemd); falls back to iwgetid.
+    """
+    # 0) iw link — works when associated; reliable under systemd if iw exists
+    for iw in ("iw", "/sbin/iw", "/usr/sbin/iw"):
+        try:
+            result = subprocess.run(
+                [iw, "dev", ifname, "link"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                for line in (result.stdout or "").splitlines():
+                    line = line.strip()
+                    if line.startswith("SSID:"):
+                        ssid = _normalize_ssid(line.split(":", 1)[1])
+                        if ssid:
+                            return ssid
+        except Exception:
+            continue
+
+    # 1) nmcli: active AP row (IN-USE is '*')
     try:
-        # Get IP address for the specified interface
-        result = subprocess.check_output(
-            ["iwgetid", "wlan0", "--raw"],
-            stderr=subprocess.DEVNULL
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "IN-USE,SSID", "device", "wifi", "list", "ifname", ifname],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
+        if result.returncode == 0:
+            for line in (result.stdout or "").splitlines():
+                # Formats: "*:MySSID" or "yes:MySSID" depending on nmcli version
+                if line.startswith("*:") or line.startswith("yes:"):
+                    ssid = _normalize_ssid(line.split(":", 1)[1] if ":" in line else "")
+                    if ssid:
+                        return ssid
+    except Exception:
+        pass
 
-        ssid = result.decode().strip()
-        if ssid:
-            if not quiet:
-                printDebug(f"WIFI Connected: {ssid}", cfg.PRINT_DEBUG_WIFI)
-        else:
-            if not quiet:
-                printDebug("No WIFI Connection", cfg.PRINT_DEBUG_WIFI)
+    # 2) nmcli: ACTIVE,SSID on device wifi
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            for line in (result.stdout or "").splitlines():
+                if line.startswith("yes:"):
+                    ssid = _normalize_ssid(line[4:])
+                    if ssid:
+                        return ssid
+    except Exception:
+        pass
 
-        return ssid
-    except subprocess.CalledProcessError:
-        # Not associated / no link — normal when down; don't spam ERROR every poll
+    # 3) nmcli: 802-11-wireless.ssid of active connection on ifname
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,DEVICE,TYPE", "connection", "show", "--active"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            for line in (result.stdout or "").splitlines():
+                parts = line.split(":")
+                if len(parts) >= 3 and parts[1] == ifname and "wireless" in parts[2].lower():
+                    con_name = parts[0].replace("\\:", ":")
+                    ssid_r = subprocess.run(
+                        ["nmcli", "-g", "802-11-wireless.ssid", "connection", "show", con_name],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    ssid = _normalize_ssid((ssid_r.stdout or "").strip())
+                    if ssid:
+                        return ssid
+    except Exception:
+        pass
+
+    # 4) iwgetid fallback (may be missing from systemd PATH)
+    for cmd in (
+        ["iwgetid", ifname, "--raw"],
+        ["iwgetid", ifname, "-r"],
+        ["/sbin/iwgetid", ifname, "-r"],
+        ["/usr/sbin/iwgetid", ifname, "-r"],
+    ):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                ssid = _normalize_ssid(result.stdout)
+                if ssid:
+                    return ssid
+        except Exception:
+            continue
+
+    return None
+
+
+def checkWifiConnection(quiet: bool = False):
+    ssid = get_connected_wifi_ssid(INTERFACE_WIFI)
+    if ssid:
         if not quiet:
-            printDebug("No WIFI Connection", cfg.PRINT_DEBUG_WIFI)
-        return None
+            printDebug(f"WIFI Connected: {ssid}", cfg.PRINT_DEBUG_WIFI)
+        return ssid
+    if not quiet:
+        printDebug("No WIFI Connection", cfg.PRINT_DEBUG_WIFI)
+    return None
+
+
+def wifi_ssids_match(saved: str | None, connected: str | None) -> bool:
+    """True if both SSIDs are present and equal after normalization."""
+    a = _normalize_ssid(saved)
+    b = _normalize_ssid(connected)
+    return bool(a) and bool(b) and a == b
 
 
 def wifi_link_ok() -> bool:
-    """True if wlan0 has an SSID and a non-zero IPv4 address."""
+    """True if wlan0 has the saved SSID (when known) and a non-zero IPv4 address."""
     ssid = checkWifiConnection(quiet=True)
     ip = get_local_ip_address(INTERFACE_WIFI)
-    return bool(ssid) and bool(ip) and ip != "0.0.0.0"
+    if not ssid or not ip or ip == "0.0.0.0":
+        return False
+    if WIFI_SSID and not wifi_ssids_match(WIFI_SSID, ssid):
+        return False
+    return True
 
 
-async def ensure_wifi_connected() -> bool:
+async def check_wifi_creds() -> bool:
     """
-    Idle WiFi watchdog: if link is down, try nmcli reconnect with saved creds.
+    Idle WiFi watchdog: if link is down or SSID mismatches saved creds,
+    try nmcli reconnect with saved creds.
     Returns True when WiFi looks healthy.
     Logs only on state change (down once, restored once) — not every retry.
     """
@@ -577,50 +728,90 @@ async def ensure_wifi_connected() -> bool:
     if not args.wifi:
         return True
 
-    if wifi_link_ok():
-        IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
-        if _wifi_was_down:
-            printDebug(f"WiFi restored: {IP_ADDRESS}", True)
-            try:
-                fire_sync_ip_address(IP_ADDRESS)
-            except Exception as e:
-                printDebug(f"WiFi restore: fire_sync_ip_address failed: {e}", cfg.PRINT_DEBUG_ERROR)
-            _wifi_was_down = False
-        return True
-
-    first_down = not _wifi_was_down
-    _wifi_was_down = True
-    if first_down:
-        printDebug("WiFi down — attempting reconnect ...", cfg.PRINT_DEBUG_ERROR)
-
     if not WIFI_SSID:
-        WIFI_SSID, WIFI_PASSWORD = WifiCredentials.get_credentials(new_creds=False)
+        WIFI_SSID, WIFI_PASSWORD = WifiCredentials.load_saved_credentials()
 
-    ok = await asyncio.to_thread(
-        WifiCredentials.verify_wifi_credentials,
-        WIFI_SSID,
-        WIFI_PASSWORD,
-        20,
-        "wlan0",
-        not first_down,  # quiet after first notice
+    was_down = _wifi_was_down
+    current = checkWifiConnection(quiet=True)
+    printDebug(
+        f"My WiFi SSID '{_normalize_ssid(current)}' ",
+        True,
     )
-    if not ok:
-        if first_down:
-            printDebug("WiFi reconnect failed — will retry quietly", cfg.PRINT_DEBUG_ERROR)
-        return False
 
-    IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
-    if not wifi_link_ok():
-        if first_down:
-            printDebug("WiFi reconnect: joined but no IP yet — will retry quietly", cfg.PRINT_DEBUG_ERROR)
+    if current and WIFI_SSID and not wifi_ssids_match(WIFI_SSID, current):
+        _wifi_was_down = True
+        if not was_down:
+            printDebug(
+                f"WiFi SSID MISMATCH: saved '{_normalize_ssid(WIFI_SSID)}' "
+                f"but Pi is on '{_normalize_ssid(current)}' "
+                "— reconnecting to saved network...",
+                True,
+            )
         return False
+        # Fall through to reconnect with saved credentials
+    # elif wifi_link_ok():
+    #     IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
+    #     if _wifi_was_down:
+    #         printDebug(
+    #             f"WiFi restored: WiFi SSID '{WIFI_SSID}' IP {IP_ADDRESS}",
+    #             True,
+    #         )
+    #         try:
+    #             fire_sync_ip_address(IP_ADDRESS)
+    #         except Exception as e:
+    #             printDebug(f"WiFi restore: fire_sync_ip_address failed: {e}", cfg.PRINT_DEBUG_ERROR)
+    #         _wifi_was_down = False
+    #     return True
+    # else:
+    #     _wifi_was_down = True
+    #     if not was_down:
+    #         printDebug("WiFi down — attempting reconnect ...", cfg.PRINT_DEBUG_ERROR)
 
-    printDebug(f"WiFi reconnected: {IP_ADDRESS}", True)
-    try:
-        fire_sync_ip_address(IP_ADDRESS)
-    except Exception as e:
-        printDebug(f"WiFi reconnect: fire_sync_ip_address failed: {e}", cfg.PRINT_DEBUG_ERROR)
-    _wifi_was_down = False
+    # if not WIFI_SSID:
+    #     if not was_down:
+    #         printDebug("No saved WiFi SSID — cannot reconnect", True)
+    #     _wifi_was_down = True
+    #     return False
+
+    # announce = not was_down  # log details only on first failure / mismatch
+    # ok = await asyncio.to_thread(
+    #     WifiCredentials.verify_wifi_credentials,
+    #     WIFI_SSID,
+    #     WIFI_PASSWORD,
+    #     20,
+    #     INTERFACE_WIFI,
+    #     not announce,  # quiet after first notice
+    # )
+    # if not ok:
+    #     if announce:
+    #         printDebug(
+    #             f"WiFi reconnect failed for WiFi SSID '{WIFI_SSID}' "
+    #             "(credentials wrong or network unavailable) — will retry quietly",
+    #             True,
+    #         )
+    #     return False
+
+    # IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
+    # connected = checkWifiConnection(quiet=True)
+    # if connected and WIFI_SSID and not wifi_ssids_match(WIFI_SSID, connected):
+    #     if announce:
+    #         printDebug(
+    #             f"WiFi SSID MISMATCH after reconnect: saved '{_normalize_ssid(WIFI_SSID)}' "
+    #             f"but Pi is on '{_normalize_ssid(connected)}'",
+    #             True,
+    #         )
+    #     return False
+    # if not wifi_link_ok():
+    #     if announce:
+    #         printDebug("WiFi reconnect: joined but no IP yet — will retry quietly", cfg.PRINT_DEBUG_ERROR)
+    #     return False
+
+    # printDebug(f"WiFi reconnected: WiFi SSID '{WIFI_SSID}' IP {IP_ADDRESS}", True)
+    # try:
+    #     fire_sync_ip_address(IP_ADDRESS)
+    # except Exception as e:
+    #     printDebug(f"WiFi reconnect: fire_sync_ip_address failed: {e}", cfg.PRINT_DEBUG_ERROR)
+    # _wifi_was_down = False
     return True
 
 
@@ -1690,24 +1881,94 @@ async def main():
             # Connect LAN / Wifi
             case 1:
                 if(args.wifi):
-                    # Load + verify WiFi first; get_credentials exits if join fails
-                    WIFI_SSID, WIFI_PASSWORD = WifiCredentials.get_credentials(
-                        new_creds=args.newcreds,
-                    )
-                    IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
-                   
-                    wifiname = checkWifiConnection()
-                    if not wifiname or not IP_ADDRESS or IP_ADDRESS == "0.0.0.0":
-                        printDebug(
-                            "WiFi not available — will not continue until connected",
-                            cfg.PRINT_DEBUG_ERROR,
+                    if args.newcreds:
+                        # Interactive one-shot only (exits process if verify fails)
+                        WIFI_SSID, WIFI_PASSWORD = WifiCredentials.get_credentials(
+                            new_creds=True,
                         )
-                        await asyncio.sleep(5)
+                    else:
+                        WIFI_SSID, WIFI_PASSWORD = WifiCredentials.load_saved_credentials()
+
+                    if not WIFI_SSID:
+                        printDebug(
+                            "No saved WiFi SSID — use Set Wifi Credentials, then restart.",
+                            True,
+                        )
+                        await asyncio.sleep(10)
                         # Stay on case 1
                     else:
-                        casePtr += 1
-                        printDebug(f"Service Running on WIFI: {IP_ADDRESS}", True)
-                        printDebug(f"Connected IP: {IP_ADDRESS}", True)
+                        printDebug(f"Saved WiFi SSID: {_normalize_ssid(WIFI_SSID)}", True)
+                        current_ssid = checkWifiConnection(quiet=True)
+                        if current_ssid:
+                            printDebug(
+                                f"Raspberry Pi connected WiFi SSID: {_normalize_ssid(current_ssid)}",
+                                True,
+                            )
+                            if not wifi_ssids_match(WIFI_SSID, current_ssid):
+                                printDebug(
+                                    f"WiFi SSID MISMATCH: saved '{_normalize_ssid(WIFI_SSID)}' "
+                                    f"but Pi is on '{_normalize_ssid(current_ssid)}' "
+                                    "— reconnecting to saved network...",
+                                    True,
+                                )
+                        else:
+                            printDebug(
+                                "Raspberry Pi connected WiFi SSID: (none) — "
+                                "could not read association (will test saved credentials)",
+                                True,
+                            )
+
+                        printDebug(
+                            f"Testing WiFi credentials for WiFi SSID '{_normalize_ssid(WIFI_SSID)}'...",
+                            True,
+                        )
+                        ok = await asyncio.to_thread(
+                            WifiCredentials.verify_wifi_credentials,
+                            WIFI_SSID,
+                            WIFI_PASSWORD,
+                            20,
+                            INTERFACE_WIFI,
+                            False,
+                        )
+                        if not ok:
+                            printDebug(
+                                f"WiFi credentials WRONG for WiFi SSID '{_normalize_ssid(WIFI_SSID)}' "
+                                "(or network out of range). "
+                                "Fix with Set Wifi Credentials, then restart.",
+                                True,
+                            )
+                            await asyncio.sleep(15)
+                            # Stay on case 1 — keep retrying / keep message visible
+                        else:
+                            IP_ADDRESS = get_local_ip_address(INTERFACE_WIFI)
+                            wifiname = checkWifiConnection(quiet=True)
+                            if not wifiname or not IP_ADDRESS or IP_ADDRESS == "0.0.0.0":
+                                printDebug(
+                                    f"WiFi joined '{_normalize_ssid(WIFI_SSID)}' but no IP yet — retrying...",
+                                    True,
+                                )
+                                await asyncio.sleep(5)
+                            elif not wifi_ssids_match(WIFI_SSID, wifiname):
+                                printDebug(
+                                    f"WiFi SSID MISMATCH after connect: "
+                                    f"saved '{_normalize_ssid(WIFI_SSID)}' "
+                                    f"but Pi is on '{_normalize_ssid(wifiname)}' — retrying...",
+                                    True,
+                                )
+                                await asyncio.sleep(5)
+                            else:
+                                casePtr += 1
+                                printDebug(
+                                    f"WiFi SSID match OK — saved and connected "
+                                    f"'{_normalize_ssid(WIFI_SSID)}'",
+                                    True,
+                                )
+                                printDebug(
+                                    f"WiFi OK — WiFi SSID '{_normalize_ssid(WIFI_SSID)}' "
+                                    f"IP {IP_ADDRESS}",
+                                    True,
+                                )
+                                printDebug(f"Connected IP: {IP_ADDRESS}", True)
                 else:
                    IP_ADDRESS = get_local_ip_address(INTERFACE_ETH)
                    if not IP_ADDRESS or IP_ADDRESS == "0.0.0.0":
@@ -1747,11 +2008,17 @@ async def main():
             # Get Wifi Credentials (for BLE share to IoTs; already done in case 1 if --wifi)
             case 3:
                 if not WIFI_SSID:
-                    WIFI_SSID, WIFI_PASSWORD = WifiCredentials.get_credentials(
-                        new_creds=args.newcreds,
-                    )
+                    WIFI_SSID, WIFI_PASSWORD = WifiCredentials.load_saved_credentials()
 
-                printDebug(f"SSID: {WIFI_SSID}",cfg.PRINT_DEBUG_WIFI)
+                saved = _normalize_ssid(WIFI_SSID)
+                connected = _normalize_ssid(get_connected_wifi_ssid(INTERFACE_WIFI))
+                
+                if saved and connected and not wifi_ssids_match(saved, connected):
+                    printDebug(f"Saved SSID: {saved or '(none)'}", True)
+                    printDebug(f"My SSID: {connected or '(none)'}", True)
+                    printDebug("WiFi SSID MISMATCH",True,)
+                elif saved and connected:
+                    printDebug(f"WiFi SSID OK: '{saved}'", True)
                 #print(f"Password: {WIFI_PASSWORD}") 
                 casePtr+=1
 
@@ -1784,7 +2051,7 @@ async def main():
                     now = time.monotonic()
                     if now >= _wifi_watchdog_next:
                         _wifi_watchdog_next = now + WIFI_WATCHDOG_INTERVAL_S
-                        await ensure_wifi_connected()
+                        #await ensure_wifi_connected()
 
                 # New Operator Data Available
                 if new_operator_data_available:
@@ -1825,6 +2092,17 @@ async def main():
                         elif command == MqttService.MQTT_CMD_SEND_WIFI:
                             to_id = message.get(MqttService.MQTT_SETTING_TO_DEVICE_ID, "") or ""
                             asyncio.create_task(bt_force_send_wifi(to_id))
+
+                        # Unpair — remove IoT from local paired list; SHOESH over BLE if connected
+                        elif command == MqttService.MQTT_CMD_UNPAIR_MONITOR:
+                            to_id = message.get(MqttService.MQTT_SETTING_TO_DEVICE_ID, "") or ""
+                            removed = remove_paired_iot(ble_name=to_id)
+                            printDebug(
+                                f"UNPAIR_MONITOR: ble_name={to_id!r} removed={removed}",
+                                cfg.PRINT_DEBUG_MONITOR,
+                            )
+                            if to_id:
+                                asyncio.create_task(bt_send_shoesh_to_iot(to_id))
 
                         # Connect Base
                         elif command == MqttService.MQTT_CMD_CONNECT_BASE:

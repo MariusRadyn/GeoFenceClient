@@ -50,6 +50,7 @@ MQTT_CMD_SYNC_SETTINGS = "#SYNC_SETTINGS"
 MQTT_CMD_CONNECT_MONITOR = "#CONNECT_MONITOR"
 MQTT_CMD_CONNECT_BASE = "#CONNECT_BASE"
 MQTT_CMD_DISCONNECT_MONITOR = "#DISCONNECT_MONITOR"
+MQTT_CMD_UNPAIR_MONITOR = "#UNPAIR_MONITOR"  # Android → base: remove IoT from paired list
 MQTT_CMD_PING = "#PING"
 MQTT_CMD_FIND = "#FIND"
 MQTT_CMD_SEND_WIFI = "#SEND_WIFI"  # Android → base: force BLE WiFi/MQTT creds to IoT
@@ -417,6 +418,47 @@ class MqttServer:
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 
+                # Unpair Monitor — remove from base paired list + tell IoT
+                if(command == MQTT_CMD_UNPAIR_MONITOR):
+                    print(
+                        f"UNPAIR_MONITOR from app: to={to_id!r} from={from_id!r}",
+                        flush=True,
+                    )
+                    try:
+                        self.queue.put_nowait(jsondata)
+                    except Full:
+                        self.queue.get_nowait()
+                        self.queue.put_nowait(jsondata)
+
+                    # Forward to IoT so it stops MQTT until re-paired
+                    if to_id:
+                        iot_topic = f"{MQTT_TOPIC_TO_IOT}/{to_id}"
+                        out_payload = payload if isinstance(payload, dict) else {}
+                        unpair_payload = {
+                            MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                            MQTT_SETTING_TO_DEVICE_ID: to_id,
+                            MQTT_SETTING_TOPIC: iot_topic,
+                            MQTT_SETTING_PAYLOAD: out_payload,
+                            MQTT_SETTING_CMD: MQTT_CMD_UNPAIR_MONITOR,
+                        }
+                        client.publish(iot_topic, json.dumps(unpair_payload))
+                        self.printDebug(f"MQTT TX: {unpair_payload}", cfg.PRINT_MQTT_COMMS)
+
+                    # Ack to Android so the UI clears the Monitor ID
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{from_id}"
+                    txPayload = {
+                        MQTT_SETTING_FROM_DEVICE_ID: myId,
+                        MQTT_SETTING_TO_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: {
+                            "status": "unpaired",
+                            "to": to_id or "",
+                        },
+                        MQTT_SETTING_CMD: MQTT_CMD_UNPAIR_MONITOR,
+                    }
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
+
                 # Find Monitor (locate: beep + LEDs) — forward to that IoT
                 if(command == MQTT_CMD_FIND):
                     # Always print (even without --mqtt) so Find is easy to verify.
@@ -548,7 +590,8 @@ class MqttServer:
                     )
                     
                     # Unpaired IoT PINGing this base → tell it via BLE to stop MQTT
-                    if command == MQTT_CMD_PING:
+                    # Skip during Android pair window — SHOESH mid-pair breaks re-pair.
+                    if command == MQTT_CMD_PING and not cfg.is_pair_mode_active():
                         try:
                             self.queue.put_nowait({
                                 MQTT_SETTING_FROM_DEVICE_ID: from_id,
@@ -695,6 +738,18 @@ class MqttServer:
                         MQTT_SETTING_CMD:MQTT_CMD_DISCONNECT_MONITOR
                     }
         
+                    client.publish(response_topic, json.dumps(txPayload))
+                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
+
+                # Unpair ack (IOT to Android)
+                if(command == MQTT_CMD_UNPAIR_MONITOR):
+                    response_topic = f"{MQTT_TOPIC_TO_ANDROID}/{to_id}"
+                    txPayload = {
+                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
+                        MQTT_SETTING_TOPIC: response_topic,
+                        MQTT_SETTING_PAYLOAD: payload if isinstance(payload, dict) else "",
+                        MQTT_SETTING_CMD: MQTT_CMD_UNPAIR_MONITOR,
+                    }
                     client.publish(response_topic, json.dumps(txPayload))
                     self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
 

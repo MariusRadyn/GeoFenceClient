@@ -187,6 +187,12 @@ paired_iots_file = os.path.expanduser("~/Secure/paired_iots.json")
 _paired_iots_lock = threading.Lock()
 
 
+def is_pair_mode_active() -> bool:
+    """True while Android #DISCOVER pair window is open (monotonic)."""
+    import time
+    return time.monotonic() < float(pair_mode_until or 0.0)
+
+
 def is_iot_paired(ble_address: str = "", ble_name: str = "") -> bool:
     addr = (ble_address or "").strip().upper()
     name = (ble_name or "").strip()

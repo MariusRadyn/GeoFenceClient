@@ -116,11 +116,11 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0", quiet=
     ssid = (ssid or "").strip()
     if not ssid:
         if not quiet:
-            printDebug("WiFi verify failed: empty SSID", cfg.PRINT_DEBUG_ERROR)
+            printDebug("WiFi verify failed: empty SSID", True)
         return False
 
     if not quiet:
-        printDebug(f"Verifying WiFi credentials for '{ssid}'...", cfg.PRINT_DEBUG_GENERAL)
+        printDebug(f"Testing WiFi credentials for WiFi SSID '{ssid}'...", True)
     con_name = f"geofence-verify-{ssid}"[:100]
 
     # Newer NetworkManager rejects `device wifi connect ... password` with
@@ -139,6 +139,40 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0", quiet=
             "wifi-sec.psk", password,
         ])
 
+    def _classify_fail(err: str) -> str:
+        low = (err or "").lower()
+        if any(
+            x in low
+            for x in (
+                "secrets were required",
+                "psk",
+                "password",
+                "802-11-wireless-security",
+                "no key",
+                "bad password",
+                "wrong password",
+                "authentication",
+            )
+        ):
+            return f"WiFi credentials WRONG for WiFi SSID '{ssid}'"
+        if any(
+            x in low
+            for x in (
+                "no network",
+                "not found",
+                "ssid",
+                "no suitable",
+                "unavailable",
+                "scanning",
+            )
+        ):
+            return f"WiFi network '{ssid}' not found / out of range"
+        if "timeout" in low or "timed out" in low:
+            return f"WiFi connect timed out for WiFi SSID '{ssid}'"
+        if err:
+            return f"WiFi connect failed for WiFi SSID '{ssid}': {err}"
+        return f"WiFi credentials WRONG or network unavailable for WiFi SSID '{ssid}'"
+
     try:
         subprocess.run(
             ["nmcli", "connection", "delete", con_name],
@@ -149,7 +183,7 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0", quiet=
         if add.returncode != 0:
             err = (add.stderr or add.stdout or "").strip()
             if not quiet:
-                printDebug(f"FAIL: {err or f'exit {add.returncode}'}", cfg.PRINT_DEBUG_ERROR)
+                printDebug(_classify_fail(err), True)
             return False
 
         up = subprocess.run(
@@ -161,7 +195,7 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0", quiet=
         if up.returncode != 0:
             err = (up.stderr or up.stdout or "").strip()
             if not quiet:
-                printDebug(f"FAIL: {err or f'exit {up.returncode}'}", cfg.PRINT_DEBUG_ERROR)
+                printDebug(_classify_fail(err), True)
             subprocess.run(
                 ["nmcli", "connection", "delete", con_name],
                 capture_output=True, text=True,
@@ -174,11 +208,11 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0", quiet=
             capture_output=True, text=True, timeout=10,
         )
         if not quiet:
-            printDebug(f"WiFi OK: connected to '{ssid}'", cfg.PRINT_DEBUG_GENERAL)
+            printDebug(f"WiFi credentials OK — connected to '{ssid}'", True)
         return True
     except subprocess.TimeoutExpired:
         if not quiet:
-            printDebug("WiFi verify failed: timed out", cfg.PRINT_DEBUG_ERROR)
+            printDebug(f"WiFi connect timed out for WiFi SSID '{ssid}'", True)
         subprocess.run(
             ["nmcli", "connection", "delete", con_name],
             capture_output=True, text=True,
@@ -186,7 +220,7 @@ def verify_wifi_credentials(ssid, password, timeout_s=20, ifname="wlan0", quiet=
         return False
     except Exception as e:
         if not quiet:
-            printDebug(f"WiFi verify error: {e}", cfg.PRINT_DEBUG_ERROR)
+            printDebug(f"WiFi verify error for WiFi SSID '{ssid}': {e}", True)
         subprocess.run(
             ["nmcli", "connection", "delete", con_name],
             capture_output=True, text=True,
@@ -236,6 +270,19 @@ def is_interactive() -> bool:
         return False
 
 
+def load_saved_credentials():
+    """Load encrypted SSID/password without joining WiFi. Returns (ssid, password)."""
+    create_secure_dir()
+    if not os.path.exists(DATA_FILE):
+        return "", ""
+    try:
+        creds = read_credentials_file()
+        return (creds.get("ssid") or "").strip(), creds.get("password") or ""
+    except Exception as e:
+        printDebug(f"ERROR: could not read WiFi credentials: {e}", True)
+        return "", ""
+
+
 def get_credentials(new_creds=False):
 
     creds = {
@@ -270,14 +317,19 @@ def get_credentials(new_creds=False):
                 sys.exit(1)
 
             parsed = json.loads(data.decode())
-            if verify_wifi_credentials(parsed.get("ssid", ""), parsed.get("password", "")):
+            ssid = (parsed.get("ssid") or "").strip()
+            printDebug(f"WiFi SSID: {ssid}", True)
+            if verify_wifi_credentials(ssid, parsed.get("password", "")):
                 write_credentials_file(data)
                 creds = parsed
                 # One-shot: do not prompt again on next boot/service start
                 cfg.clear_newcreds()
                 break
 
-            printDebug("Credentials incorrect or WiFi not available — not saved.", cfg.PRINT_DEBUG_ERROR)
+            printDebug(
+                f"WiFi credentials WRONG or network unavailable for WiFi SSID '{ssid}' — not saved.",
+                True,
+            )
             retry = input("Try again? [Y/n]: ").strip().lower()
             if retry == "n":
                 printDebug("Aborting: WiFi credentials not verified.", cfg.PRINT_DEBUG_ERROR)
@@ -286,18 +338,27 @@ def get_credentials(new_creds=False):
     else:
         # Read existing credentials
         if not os.path.exists(DATA_FILE):
-            printDebug("No WiFi credentials file found. Run with --newcreds from a terminal.", cfg.PRINT_DEBUG_ERROR)
+            printDebug("No WiFi credentials file found. Run with --newcreds from a terminal.", True)
             if getattr(args, "wifi", False):
                 sys.exit(1)
             return creds["ssid"], creds["password"]
 
         printDebug("Restore WiFi credentials", cfg.PRINT_DEBUG_GENERAL)
         creds = read_credentials_file()
+        ssid = (creds.get("ssid") or "").strip()
+        printDebug(f"WiFi SSID: {ssid or '(empty)'}", True)
 
         # When logging onto WiFi, require a live connection before continuing
         if getattr(args, "wifi", False):
-            if not verify_wifi_credentials(creds.get("ssid", ""), creds.get("password", "")):
-                printDebug("WiFi not available or credentials wrong — aborting.", cfg.PRINT_DEBUG_ERROR)
+            if not ssid:
+                printDebug("WiFi SSID missing in saved credentials.", True)
+                sys.exit(1)
+            if not verify_wifi_credentials(ssid, creds.get("password", "")):
+                printDebug(
+                    f"WiFi credentials WRONG for WiFi SSID '{ssid}' "
+                    "(or network out of range). Fix with Set Wifi Credentials.",
+                    True,
+                )
                 sys.exit(1)
 
     printDebug("WiFi Started.", True)

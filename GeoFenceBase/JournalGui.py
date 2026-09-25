@@ -7,6 +7,7 @@ Shows live output from:
 
 Run:
   ~/venv312/bin/python ~/GeoFenceBase/JournalGui.py
+  sudo bash SetupTrinityUser.sh to copy to /opt
 """
 
 from __future__ import annotations
@@ -108,50 +109,62 @@ class JournalGui(tk.Tk):
         self._paused = False
         self._autoscroll = tk.BooleanVar(value=True)
         self._boot_only = tk.BooleanVar(value=True)
+        self._show_meta = tk.BooleanVar(value=False)  # False = messages only (-o cat)
         self._verbose = False
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self.start_follow)
         self.after(80, self._drain_queue)
-        self.after(150, self._refresh_verbose_state)
+        # Verbose is opt-in: force OFF in config when opening the monitor
+        self.after(150, self._ensure_verbose_off_default)
 
     def _build_ui(self):
-        top = ttk.Frame(self, padding=(8, 8, 8, 4))
-        top.pack(fill=tk.X)
+        header = ttk.Frame(self, padding=(8, 8, 8, 4))
+        header.pack(fill=tk.X)
 
-        self.btn_start = ttk.Button(top, text="Follow", command=self.start_follow)
+        btn_row = ttk.Frame(header)
+        btn_row.pack(fill=tk.X)
+
+        self.btn_start = ttk.Button(btn_row, text="Follow", command=self.start_follow)
         self.btn_start.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.btn_stop = ttk.Button(top, text="Stop", command=self.stop_follow)
+        self.btn_stop = ttk.Button(btn_row, text="Stop", command=self.stop_follow)
         self.btn_stop.pack(side=tk.LEFT, padx=4)
 
-        self.btn_clear = ttk.Button(top, text="Clear", command=self.clear_view)
+        self.btn_clear = ttk.Button(btn_row, text="Clear", command=self.clear_view)
         self.btn_clear.pack(side=tk.LEFT, padx=4)
 
-        self.btn_restart = ttk.Button(top, text="Restart Service", command=self.restart_service)
+        self.btn_restart = ttk.Button(btn_row, text="Restart", command=self.restart_service)
         self.btn_restart.pack(side=tk.LEFT, padx=4)
 
-        self.btn_verbose = ttk.Button(top, text="Verbose: …", command=self.toggle_verbose)
+        self.btn_verbose = ttk.Button(btn_row, text="Verbose: OFF", command=self.toggle_verbose)
         self.btn_verbose.pack(side=tk.LEFT, padx=4)
 
-        ttk.Checkbutton(
-            top, text="This boot only (-b)", variable=self._boot_only, command=self._on_options_changed
-        ).pack(side=tk.LEFT, padx=(12, 4))
-
-        ttk.Checkbutton(
-            top, text="Auto-scroll", variable=self._autoscroll
-        ).pack(side=tk.LEFT, padx=4)
-
         self.status_var = tk.StringVar(value="Starting…")
-        ttk.Label(top, textvariable=self.status_var).pack(side=tk.RIGHT)
+        ttk.Label(btn_row, textvariable=self.status_var).pack(side=tk.RIGHT)
+
+        opt_row = ttk.Frame(header)
+        opt_row.pack(fill=tk.X, pady=(6, 0))
+
+        ttk.Checkbutton(
+            opt_row, text="This boot", variable=self._boot_only, command=self._on_options_changed
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Checkbutton(
+            opt_row, text="Time", variable=self._show_meta, command=self._on_options_changed
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Checkbutton(
+            opt_row, text="Scroll", variable=self._autoscroll
+        ).pack(side=tk.LEFT)
 
         mid = ttk.Frame(self, padding=(8, 0, 8, 8))
         mid.pack(fill=tk.BOTH, expand=True)
 
         self.text = scrolledtext.ScrolledText(
             mid,
-            wrap=tk.NONE,
+            wrap=tk.WORD,
             font=("DejaVu Sans Mono", 10),
             background="#1e1e1e",
             foreground="#d4d4d4",
@@ -160,17 +173,14 @@ class JournalGui(tk.Tk):
         )
         self.text.pack(fill=tk.BOTH, expand=True)
 
-        # Horizontal scrollbar for long lines
-        xscroll = ttk.Scrollbar(mid, orient=tk.HORIZONTAL, command=self.text.xview)
-        xscroll.pack(fill=tk.X)
-        self.text.configure(xscrollcommand=xscroll.set)
-
         self.text.tag_configure("error", foreground="#f48771")
         self.text.tag_configure("warn", foreground="#dcdcaa")
         self.text.tag_configure("ok", foreground="#89d185")
 
     def _journal_cmd(self) -> list[str]:
-        cmd = ["journalctl", "-u", SERVICE_NAME, "-f", "--no-pager", "-o", "short-iso"]
+        # -o cat = message text only (no host/unit/pid/timestamp noise)
+        fmt = "short-iso" if self._show_meta.get() else "cat"
+        cmd = ["journalctl", "-u", SERVICE_NAME, "-f", "--no-pager", "-o", fmt]
         if self._boot_only.get():
             cmd.insert(1, "-b")
         return cmd
@@ -249,6 +259,9 @@ class JournalGui(tk.Tk):
         return None
 
     def _append_line(self, line: str):
+        # Skip blank / whitespace-only lines (verbose mode pads journal with spaces)
+        if not line or not line.strip():
+            return
         tag = self._line_tag(line)
         self.text.configure(state=tk.NORMAL)
         if tag:
@@ -294,6 +307,40 @@ class JournalGui(tk.Tk):
     def _update_verbose_button(self):
         self.btn_verbose.config(text=f"Verbose: {'ON' if self._verbose else 'OFF'}")
 
+    def _ensure_verbose_off_default(self):
+        """Verbose is off by default when opening Service Monitor."""
+
+        def work():
+            was_on = False
+            ok_get, data_get = _run_service_config(["--get-verbose"])
+            if ok_get:
+                was_on = bool(data_get.get("verbose"))
+
+            if was_on:
+                # Clear sticky ON and restart so journal matches the button
+                ok, data = _run_service_config(["--set-verbose", "off"])
+            else:
+                ok, data = _run_service_config(
+                    ["--set-verbose", "off", "--no-restart"]
+                )
+                if not ok and ok_get:
+                    ok, data = True, {"verbose": False}
+
+            if not ok:
+                verbose = bool(data_get.get("verbose")) if ok_get else False
+                err = (data or {}).get("error") or (data_get or {}).get("error") or ""
+                self.after(0, lambda: self._on_verbose_state(ok_get, verbose, err))
+                return
+
+            def done():
+                self._on_verbose_state(True, False, "")
+                if was_on:
+                    self.start_follow()
+
+            self.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _refresh_verbose_state(self):
         def work():
             ok, data = _run_service_config(["--get-verbose"])
@@ -305,11 +352,14 @@ class JournalGui(tk.Tk):
 
     def _on_verbose_state(self, ok: bool, verbose: bool, err: str):
         if ok:
-            self._verbose = verbose
+            self._verbose = bool(verbose)
             self._update_verbose_button()
         else:
-            self.btn_verbose.config(text="Verbose: ?")
-            self.status_var.set(f"Verbose status unavailable: {err}")
+            # Default to OFF if status cannot be read
+            self._verbose = False
+            self._update_verbose_button()
+            if err:
+                self.status_var.set(f"Verbose status unavailable: {err}")
 
     def toggle_verbose(self):
         new_val = not self._verbose
@@ -317,8 +367,7 @@ class JournalGui(tk.Tk):
         if not messagebox.askyesno(
             "Toggle verbose",
             f"Turn verbose logging {label}?\n\n"
-            f"This updates geofence.conf and restarts {SERVICE_NAME}.\n"
-            f"You will be asked for an administrator password.",
+            f"You will be asked for an admin password.",
         ):
             return
         self.btn_verbose.config(state=tk.DISABLED)
@@ -348,7 +397,7 @@ class JournalGui(tk.Tk):
                 "Verbose toggle failed",
                 err
                 or "Authentication failed or was cancelled.\n"
-                "Use the geoserver (admin) password when prompted.",
+                "Use the admin password when prompted.",
             )
 
     def restart_service(self):
