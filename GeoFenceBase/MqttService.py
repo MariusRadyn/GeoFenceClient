@@ -63,6 +63,7 @@ MQTT_CMD_TAG_REQ = "#TAG_REQ"
 MQTT_CMD_TAG_DATA = "#TAG_DATA"
 MQTT_CMD_SYNC = "#SYNC"
 MQTT_CMD_OPERATOR_DATA = "#OPERATORS"
+MQTT_CMD_REQ_OPERATORS = "#REQ_OPERATORS"  # Base → IoT: send local operatorsList
 MQTT_CMD_NEW_DATA_AVAILABLE = "#NEW_DATA_AVAILABLE"
 
 TAG_REQUESTED_FROM_DEVICE_ID = ""
@@ -191,6 +192,23 @@ class MqttServer:
         self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
         if not to_device_id and SYNC_REQUESTED_FROM_DEVICE_ID == device_id:
             SYNC_REQUESTED_FROM_DEVICE_ID = ""
+    def requestOperators(self, to_device_id):
+        """Ask IoT to publish its local operators (IoT ver newer than cloud)."""
+        device_id = (to_device_id or "").strip()
+        if not device_id:
+            self.printDebug("requestOperators: missing device id", cfg.PRINT_DEBUG_ERROR)
+            return
+
+        response_topic = f"{MQTT_TOPIC_TO_IOT}/{device_id}"
+        txPayload = {
+            MQTT_SETTING_FROM_DEVICE_ID: self.client_id,
+            MQTT_SETTING_TO_DEVICE_ID: device_id,
+            MQTT_SETTING_TOPIC: response_topic,
+            MQTT_SETTING_PAYLOAD: {},
+            MQTT_SETTING_CMD: MQTT_CMD_REQ_OPERATORS,
+        }
+        self.client.publish(response_topic, json.dumps(txPayload))
+        self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
     def broadcastNewDataAvailable(self, iot_type):               
         response_topic = f"{MQTT_TOPIC_TO_IOT}"
         payload = {
@@ -591,7 +609,15 @@ class MqttServer:
                     
                     # Unpaired IoT PINGing this base → tell it via BLE to stop MQTT
                     # Skip during Android pair window — SHOESH mid-pair breaks re-pair.
-                    if command == MQTT_CMD_PING and not cfg.is_pair_mode_active():
+                    # Tolerate older Settings.py that lacks is_pair_mode_active().
+                    pair_fn = getattr(cfg, "is_pair_mode_active", None)
+                    if callable(pair_fn):
+                        pair_active = bool(pair_fn())
+                    else:
+                        pair_active = time.monotonic() < float(
+                            getattr(cfg, "pair_mode_until", 0) or 0
+                        )
+                    if command == MQTT_CMD_PING and not pair_active:
                         try:
                             self.queue.put_nowait({
                                 MQTT_SETTING_FROM_DEVICE_ID: from_id,
@@ -611,11 +637,13 @@ class MqttServer:
                                 pass
                     return
 
-                # Rx Device ID (Subscribe Private Topic)
+                # Rx Device ID — private FROM topic already covered by mqtt/from/iot/#
+                # (overlapping exact+wildcard delivers the same publish twice).
                 if(command == MQTT_CMD_DEVICE_ID):
-                    topic = f"{MQTT_TOPIC_FROM_IOT}/{from_id}"
-                    client.subscribe(topic)
-                    self.printDebug(f"Auto Subscribe: {topic}", cfg.PRINT_DEBUG_MQTT)
+                    self.printDebug(
+                        f"DEVICE_ID from {from_id!r} (wildcard sub already active)",
+                        cfg.PRINT_DEBUG_MQTT,
+                    )
 
                 # IOT Settings 
                 if(command == MQTT_CMD_SETTINGS):
@@ -783,21 +811,15 @@ class MqttServer:
                         client.publish(response_topic, json.dumps(txPayload))
                         self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)
      
-                # Sync 
+                # Sync — queue for main loop (do not echo #SYNC back to IoT;
+                # that was unused and could contribute to duplicate handling).
                 if(command == MQTT_CMD_SYNC):    
-                    response_topic = f"{MQTT_TOPIC_TO_IOT}/{from_id}"
                     SYNC_REQUESTED_FROM_DEVICE_ID = from_id
                     SYNC_REQUESTED_FROM_IOT_TYPE = payload.get(MQTT_SETTING_IOT_TYPE, "")
-
-                    txPayload = {
-                        MQTT_SETTING_FROM_DEVICE_ID: from_id,
-                        MQTT_SETTING_TOPIC: response_topic,
-                        MQTT_SETTING_PAYLOAD: "",
-                        MQTT_SETTING_CMD: MQTT_CMD_SYNC
-                    }
-        
-                    client.publish(response_topic, json.dumps(txPayload))
-                    self.printDebug(f"MQTT TX: {txPayload}", cfg.PRINT_MQTT_COMMS)     
+                    self.printDebug(
+                        f"SYNC queued from {from_id!r}",
+                        cfg.PRINT_MQTT_COMMS,
+                    )
     
                     # Queue for processing in main loop (to avoid doing heavy processing in callback)
                     try:
@@ -805,6 +827,20 @@ class MqttServer:
                     except Full:
                         self.queue.get_nowait()   # discard oldest
                         self.queue.put_nowait(jsondata)
+
+                # Operators reported by IoT (BLE-updated tags — pull into cloud)
+                if command == MQTT_CMD_OPERATOR_DATA:
+                    try:
+                        self.queue.put_nowait(jsondata)
+                    except Full:
+                        try:
+                            self.queue.get_nowait()
+                        except Exception:
+                            pass
+                        try:
+                            self.queue.put_nowait(jsondata)
+                        except Full:
+                            pass
         
         except Exception as e:
             self.printDebug(f"MQTT Error: {self.client_id}: {e}", cfg.PRINT_DEBUG_ERROR)

@@ -129,7 +129,10 @@ class JournalGui(tk.Tk):
         self.btn_start = ttk.Button(btn_row, text="Follow", command=self.start_follow)
         self.btn_start.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.btn_stop = ttk.Button(btn_row, text="Stop", command=self.stop_follow)
+        self.btn_svc_start = ttk.Button(btn_row, text="Start", command=self.start_service)
+        self.btn_svc_start.pack(side=tk.LEFT, padx=4)
+
+        self.btn_stop = ttk.Button(btn_row, text="Stop", command=self.stop_service)
         self.btn_stop.pack(side=tk.LEFT, padx=4)
 
         self.btn_clear = ttk.Button(btn_row, text="Clear", command=self.clear_view)
@@ -173,9 +176,17 @@ class JournalGui(tk.Tk):
         )
         self.text.pack(fill=tk.BOTH, expand=True)
 
-        self.text.tag_configure("error", foreground="#f48771")
-        self.text.tag_configure("warn", foreground="#dcdcaa")
-        self.text.tag_configure("ok", foreground="#89d185")
+        self.text.tag_configure("error", foreground="#ff4444")
+        self.text.tag_configure("mismatch", foreground="#ff2222")
+        self.text.tag_configure("ignore", foreground="#ff2222")
+        self.text.tag_configure("warn", foreground="#ffcc33")
+        self.text.tag_configure("ok", foreground="#66ff66")
+        # Ensure colored tags win over the default foreground
+        self.text.tag_raise("ignore")
+        self.text.tag_raise("mismatch")
+        self.text.tag_raise("error")
+        self.text.tag_raise("warn")
+        self.text.tag_raise("ok")
 
     def _journal_cmd(self) -> list[str]:
         # -o cat = message text only (no host/unit/pid/timestamp noise)
@@ -249,23 +260,48 @@ class JournalGui(tk.Tk):
         self.after(80, self._drain_queue)
 
     def _line_tag(self, line: str) -> str | None:
-        low = line.lower()
-        if "error" in low or "fail" in low or "traceback" in low:
+        # Strip journalctl short-iso prefix if Timestamps is on:
+        # "2026-10-01T09:00:00+02:00 host prog[123]: message"
+        msg = line.replace("\r", "")
+        if "]: " in msg:
+            msg = msg.split("]: ", 1)[-1]
+        low = msg.lower()
+        # IGNORE / MISMATCH → bright red (check before generic "error"/"warn")
+        if "ignore" in low:
+            return "ignore"
+        if "mismatch" in low:
+            return "mismatch"
+        if (
+            "error" in low
+            or "fail" in low
+            or "traceback" in low
+            or "credentials wrong" in low
+        ):
             return "error"
         if "warning" in low or "warn" in low:
             return "warn"
-        if "wifi ok" in low or "restored" in low or "reconnected" in low or "started" in low:
+        if (
+            "wifi ok" in low
+            or "ssid ok" in low
+            or "ssid match ok" in low
+            or "restored" in low
+            or "reconnected" in low
+        ):
             return "ok"
         return None
 
     def _append_line(self, line: str):
         # Skip blank / whitespace-only lines (verbose mode pads journal with spaces)
-        if not line or not line.strip():
+        line = (line or "").replace("\r", "").rstrip("\n")
+        if not line.strip():
             return
         tag = self._line_tag(line)
         self.text.configure(state=tk.NORMAL)
+        # insert(..., tag) is reliable with wrap=WORD; index +Nc often misses
         if tag:
-            self.text.insert(tk.END, line + "\n", tag)
+            self.text.insert(tk.END, line, (tag,))
+            self.text.insert(tk.END, "\n")
+            self.text.tag_raise(tag)
         else:
             self.text.insert(tk.END, line + "\n")
 
@@ -404,11 +440,27 @@ class JournalGui(tk.Tk):
         if not messagebox.askyesno("Restart service", f"Restart {SERVICE_NAME}.service now?"):
             return
         self.status_var.set("Restarting service…")
+        self._run_systemctl("restart")
+
+    def start_service(self):
+        if not messagebox.askyesno("Start service", f"Start {SERVICE_NAME}.service now?"):
+            return
+        self.status_var.set("Starting service…")
+        self._run_systemctl("start")
+
+    def stop_service(self):
+        if not messagebox.askyesno("Stop service", f"Stop {SERVICE_NAME}.service now?"):
+            return
+        self.status_var.set("Stopping service…")
+        self._run_systemctl("stop")
+
+    def _run_systemctl(self, action: str):
+        """Run systemctl start|stop|restart with passwordless sudo (trinity sudoers)."""
 
         def work():
             try:
                 r = subprocess.run(
-                    ["sudo", "-n", "systemctl", "restart", SERVICE_NAME],
+                    ["sudo", "-n", "systemctl", action, SERVICE_NAME],
                     capture_output=True,
                     text=True,
                     timeout=60,
@@ -418,21 +470,26 @@ class JournalGui(tk.Tk):
             except Exception as e:
                 ok = False
                 msg = str(e)
-            self.after(0, lambda: self._on_restart_done(ok, msg))
+            self.after(0, lambda: self._on_systemctl_done(action, ok, msg))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_restart_done(self, ok: bool, msg: str):
+    def _on_systemctl_done(self, action: str, ok: bool, msg: str):
+        label = action.capitalize()
         if ok:
-            self.status_var.set("Service restarted — following…")
-            self.start_follow()
+            if action == "stop":
+                self.status_var.set("Service stopped")
+            else:
+                self.status_var.set(f"Service {action}ed — following…")
+                self.start_follow()
         else:
-            self.status_var.set("Restart failed")
+            self.status_var.set(f"{label} failed")
             messagebox.showerror(
-                "Restart failed",
+                f"{label} failed",
                 msg
-                or "Could not restart (need passwordless sudo for systemctl).\n"
-                "Run: bash InstallService.sh",
+                or f"Could not {action} (need passwordless sudo for systemctl).\n"
+                "On trinity: re-run SetupTrinityUser.sh\n"
+                "On geoserver: ensure sudoers allows systemctl.",
             )
 
     def on_close(self):

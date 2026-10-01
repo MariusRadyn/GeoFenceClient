@@ -5,6 +5,7 @@ import json
 import subprocess
 from socket import socket
 from unicodedata import name
+import unicodedata
 from xmlrpc import client
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -156,6 +157,14 @@ FIRE_MONITOR_MARKED_FOR_DELETE = "markedToDelete"
 _shoesh_last_sent: dict = {}  # ble_name -> monotonic time
 _SHOESH_COOLDOWN_S = 10
 
+# Coalesce rapid operatorsVer bumps (Firestore+fire_apply) into one NEW_DATA.
+_NEW_DATA_DEBOUNCE_S = 1.5
+_new_operator_data_since = 0.0  # monotonic when flag first set this burst
+# Skip re-sending the same operatorsVer to the same IoT (double SYNC / double NEW_DATA).
+_ops_last_pushed: dict = {}  # device_id -> operatorsVer str
+_OPS_PUSH_DEDUP_S = 60.0
+_ops_last_pushed_at: dict = {}  # device_id -> monotonic
+
 # Lock guards the on-disk offline queue against concurrent access.
 # Today only the main loop writes to it, but firestore listeners run on
 # their own thread, so cheap insurance.
@@ -199,10 +208,47 @@ FIRESTORE_WRITE_TIMEOUT = 15  # seconds, per attempt
 FIRESTORE_RETRY_BACKOFF = (1, 3, 9)  # delays between attempts; len = retries after first try
 FIRESTORE_OFFLINE_QUEUE_MAX = 5000  # cap so disk doesn't grow forever
 
+def _mark_new_operator_data_available(reason: str = "") -> None:
+    """Set NEW_DATA flag; coalesce bursts so wheels are not pushed twice."""
+    global new_operator_data_available, _new_operator_data_since
+    now = time.monotonic()
+    if not new_operator_data_available:
+        _new_operator_data_since = now
+    new_operator_data_available = True
+    if reason:
+        printDebug(f"Operators NEW_DATA armed ({reason})", cfg.PRINT_DEBUG_OPERATOR)
+
+
+def _should_push_operators_to_device(device_id: str, ver) -> bool:
+    """False if we already pushed this operatorsVer to this IoT recently."""
+    did = (device_id or "").strip()
+    ver_s = str(ver).strip() if ver is not None else ""
+    if not did or not ver_s:
+        return True
+    now = time.monotonic()
+    if _ops_last_pushed.get(did) == ver_s:
+        last_at = float(_ops_last_pushed_at.get(did) or 0.0)
+        if now - last_at < _OPS_PUSH_DEDUP_S:
+            printDebug(
+                f"Skip duplicate #OPERATORS to {did!r} ver={ver_s}",
+                cfg.PRINT_DEBUG_OPERATOR,
+            )
+            return False
+    return True
+
+
+def _record_operators_pushed(device_id: str, ver) -> None:
+    did = (device_id or "").strip()
+    ver_s = str(ver).strip() if ver is not None else ""
+    if not did or not ver_s:
+        return
+    _ops_last_pushed[did] = ver_s
+    _ops_last_pushed_at[did] = time.monotonic()
+
+
 # Listeners
 def on_snapshot_operator(doc_snapshot, changes, read_time):
     global operators_version
-    global new_operator_data_available
 
     for doc in doc_snapshot:
         data = doc.to_dict()
@@ -211,21 +257,23 @@ def on_snapshot_operator(doc_snapshot, changes, read_time):
         # First load: just store value
         if operators_version is None:
             operators_version = current_version
-            printDebug(f"Initial Operators Version: {current_version}",cfg.PRINT_DEBUG_OPERATOR)
+            printDebug(f"Firestore Operators (tags) Version: {current_version}",cfg.PRINT_DEBUG_OPERATOR)
             return
 
-        # Only trigger if version increased
-        if current_version is not None and current_version > operators_version:
-            printDebug(f"Operators Version updated: {operators_version} → {current_version}",cfg.PRINT_DEBUG_OPERATOR)
+        # Only trigger if version increased (numeric — epoch ms strings)
+        if current_version is not None and _operators_ver_int(current_version) > _operators_ver_int(
+            operators_version
+        ):
+            printDebug(f"Operators (tags) Version updated: {operators_version} → {current_version}",cfg.PRINT_DEBUG_OPERATOR)
 
             # update stored version
             operators_version = current_version
-            new_operator_data_available = True
+            _mark_new_operator_data_available("firestore")
 def start_operators_version_listener(uid):
     """Attach Firestore snapshot listener for operatorsVer; safe to call repeatedly (same uid no-op)."""
     global operators_version_doc_ref, operators_version_listener_uid, operators_version
     
-    printDebug(f"\nStarting operators listener ...",cfg.PRINT_DEBUG_GENERAL)
+    printDebug(f"\nStarting Operator Tags listener ...",cfg.PRINT_DEBUG_GENERAL)
     
     if uid is None:
         printDebug("\nCloud listener not started: No UID. (Connect Android to BASE).",cfg.PRINT_DEBUG_ERROR)
@@ -291,16 +339,55 @@ def _rebuild_monitor_list():
     )
     changed = new_sig != old_sig
     MONITOR_DATA_LIST = rebuilt
-    printDebug(f"\nMonitor Data: {MONITOR_DATA_LIST}\n", cfg.PRINT_DEBUG_MONITOR)
+    printDebug(f"\nIoT(s) Data: {MONITOR_DATA_LIST}\n", cfg.PRINT_DEBUG_MONITOR)
     if changed:
         if rebuilt:
-            printDebug(f"Monitors loaded from Firestore: {len(rebuilt)}", True)
+            printDebug(f"IoT(s) loaded from Firestore: {len(rebuilt)}", True)
+            mon_ids = [m.mon_device_id for m in rebuilt if m.mon_device_id]
+            if mon_ids:
+                printDebug("\n".join(f"   {n}" for n in mon_ids), True)
         else:
-            printDebug("Monitors loaded from Firestore: 0", cfg.PRINT_DEBUG_MONITOR)
+            printDebug("IoT(s) loaded from Firestore: 0", cfg.PRINT_DEBUG_MONITOR)
+        _warn_paired_firestore_iot_mismatch()
     else:
         printDebug(
-            f"Monitors snapshot unchanged ({len(rebuilt)}) — skip log",
+            f"IoT(s) snapshot unchanged ({len(rebuilt)}) — skip log",
             cfg.PRINT_DEBUG_MONITOR,
+        )
+
+
+def _paired_iot_names() -> set[str]:
+    with cfg._paired_iots_lock:
+        return {
+            (e.get("ble_name") or "").strip()
+            for e in (cfg.PAIRED_IOTS or [])
+            if (e.get("ble_name") or "").strip()
+        }
+
+
+def _firestore_iot_ids() -> set[str]:
+    return {
+        (m.mon_device_id or "").strip()
+        for m in (MONITOR_DATA_LIST or [])
+        if (m.mon_device_id or "").strip()
+    }
+
+
+def _warn_paired_firestore_iot_mismatch() -> None:
+    """Warn in red (JournalGui MISMATCH) when local paired list ≠ Firestore monitors."""
+    paired = _paired_iot_names()
+    fire = _firestore_iot_ids()
+    if paired == fire:
+        return
+    only_paired = sorted(paired - fire)
+    only_fire = sorted(fire - paired)
+    printDebug("IoT list MISMATCH: paired vs Firestore", True)
+    if only_paired:
+        printDebug("\n".join(f"   MISMATCH paired only: {n}" for n in only_paired), True)
+    if only_fire:
+        printDebug(
+            "\n".join(f"   MISMATCH Firestore only: {n}" for n in only_fire),
+            True,
         )
 
 def _ingest_monitor_snapshot(doc_snapshot, base_station_doc_id: str):
@@ -570,119 +657,214 @@ def resolve_monitor(payload_monitor_id: str = "", mqtt_from_id: str = "") -> Opt
             return mon
     return None
 def _normalize_ssid(ssid: str | None) -> str:
-    """Normalize SSID for comparison (nmcli escapes ':' as '\\:')."""
+    """Normalize SSID for reliable comparison (escapes, invisible chars, BOM)."""
     if not ssid:
         return ""
-    s = str(ssid).strip().strip('"').strip("'")
-    # nmcli tabular output escapes
-    s = s.replace("\\:", ":").replace("\\\\", "\\")
-    return s
+
+    s = str(ssid)
+    # Multi-line nmcli/iw dumps must NOT be joined — that concatenates duplicate SSIDs
+    if "\n" in s or "\r" in s:
+        for part in s.replace("\r", "\n").split("\n"):
+            part = part.strip()
+            if part:
+                s = part
+                break
+        else:
+            return ""
+    s = s.replace("\x00", "")
+    s = unicodedata.normalize("NFKC", s)
+    # Strip BOM and zero-width / format chars (look identical when printed)
+    s = s.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "")
+    s = s.replace("\u200d", "")
+    s = s.replace("\u00a0", " ")  # non-breaking space → normal space
+    s = "".join(
+        c
+        for c in s
+        if unicodedata.category(c) not in ("Cf", "Cc", "Zl", "Zp")
+    )
+    s = s.strip().strip('"').strip("'")
+    # nmcli -t escapes
+    s = s.replace("\\:", ":").replace("\\,", ",").replace("\\\\", "\\")
+    # Collapse only edge whitespace again after unescape
+    return s.strip()
+
+
+def _ssid_debug(ssid: str | None) -> str:
+    """Human + repr so hidden chars are visible in logs."""
+    n = _normalize_ssid(ssid)
+    raw = "" if ssid is None else str(ssid)
+    if raw == n:
+        return f"{n!r}"
+    return f"normalized={n!r} raw={raw!r}"
 
 
 def get_connected_wifi_ssid(ifname: str = INTERFACE_WIFI) -> str | None:
     """
-    Return the SSID the Pi is currently associated with, or None if not connected.
-    Prefers nmcli (reliable under systemd); falls back to iwgetid.
+    Return the single SSID the Pi is currently associated with, or None.
+    Prefer active-connection queries (no scan cache). Never join multi-line scans.
     """
-    # 0) iw link — works when associated; reliable under systemd if iw exists
-    for iw in ("iw", "/sbin/iw", "/usr/sbin/iw"):
+    def _run(argv, timeout=10):
         try:
-            result = subprocess.run(
-                [iw, "dev", ifname, "link"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                for line in (result.stdout or "").splitlines():
+            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        except Exception:
+            return None
+
+    def _first_line(text: str | None) -> str:
+        for part in (text or "").replace("\r", "\n").split("\n"):
+            part = part.strip()
+            if part:
+                return part
+        return ""
+
+    def _split_nm_terse(line: str) -> list[str]:
+        """Split nmcli -t fields; honour backslash-escaped colons."""
+        parts: list[str] = []
+        buf: list[str] = []
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "\\" and i + 1 < len(line):
+                buf.append(line[i + 1])
+                i += 2
+                continue
+            if ch == ":":
+                parts.append("".join(buf))
+                buf = []
+                i += 1
+                continue
+            buf.append(ch)
+            i += 1
+        parts.append("".join(buf))
+        return parts
+
+    def _ssid_from_wifi_scan(stdout: str | None) -> str | None:
+        """First IN-USE / ACTIVE row only (* or yes)."""
+        for raw in (stdout or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            parts = _split_nm_terse(line)
+            if not parts:
+                continue
+            flag = parts[0].strip().lower()
+            if flag not in ("*", "yes", "y"):
+                continue
+            ssid = _normalize_ssid(parts[1] if len(parts) > 1 else "")
+            if ssid and ssid != "--":
+                return ssid
+        return None
+
+    def _ssid_from_connection_name(con_name: str) -> str | None:
+        con_name = (con_name or "").strip().replace("\\:", ":")
+        if not con_name or con_name in ("--", ":"):
+            return None
+        r = _run(["nmcli", "-g", "802-11-wireless.ssid", "connection", "show", con_name])
+        if r and r.returncode == 0:
+            ssid = _normalize_ssid(_first_line(r.stdout))
+            if ssid and ssid != "--":
+                return ssid
+        # Pi / nmcli often names the profile after the SSID
+        generic = {
+            "preconfigured",
+            "wired connection 1",
+            "wi-fi",
+            "wifi",
+            "hotspot",
+            "netplan-wlan0",
+        }
+        if con_name.lower() not in generic and not con_name.lower().startswith("wired"):
+            return _normalize_ssid(con_name) or None
+        return None
+
+    def _wifi_devices() -> list[str]:
+        """Prefer requested ifname, then any nmcli wifi device."""
+        found = []
+        r = _run(["nmcli", "-t", "-f", "DEVICE,TYPE", "device", "status"])
+        if r and r.returncode == 0:
+            for line in (r.stdout or "").splitlines():
+                parts = _split_nm_terse(line)
+                if len(parts) < 2:
+                    continue
+                dev, typ = parts[0].strip(), parts[1].strip().lower()
+                if typ in ("wifi", "802-11-wireless", "wl"):
+                    found.append(dev)
+        ordered = []
+        if ifname:
+            ordered.append(ifname)
+        for d in found:
+            if d not in ordered:
+                ordered.append(d)
+        return ordered or [ifname]
+
+    # 1) Active wifi connection on device (does not need AP scan cache)
+    for dev in _wifi_devices():
+        r = _run(
+            ["nmcli", "-t", "-f", "NAME,DEVICE,TYPE", "connection", "show", "--active"]
+        )
+        if r and r.returncode == 0:
+            for line in (r.stdout or "").splitlines():
+                parts = _split_nm_terse(line)
+                if len(parts) < 3:
+                    continue
+                typ = parts[-1].strip().lower()
+                device = parts[-2].strip()
+                name = ":".join(parts[:-2]).replace("\\:", ":").strip()
+                if device != dev:
+                    continue
+                if typ not in ("wifi", "802-11-wireless", "wireless") and "802-11" not in typ:
+                    continue
+                ssid = _ssid_from_connection_name(name)
+                if ssid:
+                    return ssid
+
+        r = _run(["nmcli", "-g", "GENERAL.CONNECTION", "device", "show", dev])
+        if r and r.returncode == 0:
+            con = _first_line(r.stdout).replace("\\:", ":").strip()
+            if con.lower().startswith("general.connection:"):
+                con = con.split(":", 1)[1].strip()
+            ssid = _ssid_from_connection_name(con)
+            if ssid:
+                return ssid
+
+    # 2) Wifi scan list — first active row only (many BSSID duplicates)
+    for fields in ("IN-USE,SSID", "ACTIVE,SSID", "IN-USE,SSID,ACTIVE"):
+        r = _run(["nmcli", "-t", "-f", fields, "device", "wifi"])
+        if r and r.returncode == 0:
+            ssid = _ssid_from_wifi_scan(r.stdout)
+            if ssid:
+                return ssid
+
+    # 3) iwgetid / iw / wpa_cli
+    for dev in _wifi_devices():
+        for cmd in (
+            ["iwgetid", dev, "-r"],
+            ["iwgetid", "-r"],
+            ["/sbin/iwgetid", dev, "-r"],
+            ["/usr/sbin/iwgetid", dev, "-r"],
+        ):
+            r = _run(cmd, timeout=5)
+            if r and r.returncode == 0:
+                ssid = _normalize_ssid(_first_line(r.stdout))
+                if ssid:
+                    return ssid
+
+        for iw in ("iw", "/sbin/iw", "/usr/sbin/iw"):
+            r = _run([iw, "dev", dev, "link"], timeout=5)
+            if r and r.returncode == 0:
+                for line in (r.stdout or "").splitlines():
                     line = line.strip()
-                    if line.startswith("SSID:"):
+                    if line.upper().startswith("SSID:"):
                         ssid = _normalize_ssid(line.split(":", 1)[1])
                         if ssid:
                             return ssid
-        except Exception:
-            continue
 
-    # 1) nmcli: active AP row (IN-USE is '*')
-    try:
-        result = subprocess.run(
-            ["nmcli", "-t", "-f", "IN-USE,SSID", "device", "wifi", "list", "ifname", ifname],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            for line in (result.stdout or "").splitlines():
-                # Formats: "*:MySSID" or "yes:MySSID" depending on nmcli version
-                if line.startswith("*:") or line.startswith("yes:"):
-                    ssid = _normalize_ssid(line.split(":", 1)[1] if ":" in line else "")
+        r = _run(["wpa_cli", "-i", dev, "status"], timeout=5)
+        if r and r.returncode == 0:
+            for line in (r.stdout or "").splitlines():
+                if line.startswith("ssid="):
+                    ssid = _normalize_ssid(line.split("=", 1)[1])
                     if ssid:
                         return ssid
-    except Exception:
-        pass
-
-    # 2) nmcli: ACTIVE,SSID on device wifi
-    try:
-        result = subprocess.run(
-            ["nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            for line in (result.stdout or "").splitlines():
-                if line.startswith("yes:"):
-                    ssid = _normalize_ssid(line[4:])
-                    if ssid:
-                        return ssid
-    except Exception:
-        pass
-
-    # 3) nmcli: 802-11-wireless.ssid of active connection on ifname
-    try:
-        result = subprocess.run(
-            ["nmcli", "-t", "-f", "NAME,DEVICE,TYPE", "connection", "show", "--active"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            for line in (result.stdout or "").splitlines():
-                parts = line.split(":")
-                if len(parts) >= 3 and parts[1] == ifname and "wireless" in parts[2].lower():
-                    con_name = parts[0].replace("\\:", ":")
-                    ssid_r = subprocess.run(
-                        ["nmcli", "-g", "802-11-wireless.ssid", "connection", "show", con_name],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                    ssid = _normalize_ssid((ssid_r.stdout or "").strip())
-                    if ssid:
-                        return ssid
-    except Exception:
-        pass
-
-    # 4) iwgetid fallback (may be missing from systemd PATH)
-    for cmd in (
-        ["iwgetid", ifname, "--raw"],
-        ["iwgetid", ifname, "-r"],
-        ["/sbin/iwgetid", ifname, "-r"],
-        ["/usr/sbin/iwgetid", ifname, "-r"],
-    ):
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                ssid = _normalize_ssid(result.stdout)
-                if ssid:
-                    return ssid
-        except Exception:
-            continue
 
     return None
 
@@ -702,7 +884,15 @@ def wifi_ssids_match(saved: str | None, connected: str | None) -> bool:
     """True if both SSIDs are present and equal after normalization."""
     a = _normalize_ssid(saved)
     b = _normalize_ssid(connected)
-    return bool(a) and bool(b) and a == b
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # Some APs / UIs differ only by trailing spaces already stripped; try casefold
+    # only when NFKC forms match case-insensitively AND lengths match (rare false pos).
+    if a.casefold() == b.casefold():
+        return True
+    return False
 
 
 def wifi_link_ok() -> bool:
@@ -745,6 +935,11 @@ async def check_wifi_creds() -> bool:
                 f"WiFi SSID MISMATCH: saved '{_normalize_ssid(WIFI_SSID)}' "
                 f"but Pi is on '{_normalize_ssid(current)}' "
                 "— reconnecting to saved network...",
+                True,
+            )
+            printDebug(
+                f"SSID compare detail: saved={_ssid_debug(WIFI_SSID)} "
+                f"connected={_ssid_debug(current)}",
                 True,
             )
         return False
@@ -1288,7 +1483,44 @@ def read_local_operators_from_file():
             printDebug(f"read_local_operators_list(): {e}",cfg.PRINT_DEBUG_ERROR)
             operators = []
     
-    return operators    
+    return operators
+
+def _operators_ver_int(v):
+    """Epoch-ms operatorsVer as int (string or number). Non-numeric → 0."""
+    if v is None:
+        return 0
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        return int(v)
+    s = str(v).strip()
+    if not s:
+        return 0
+    try:
+        return int(s)
+    except Exception:
+        return 0
+
+def _normalize_access_level_for_fire(level):
+    """Map IoT accessLevel strings to app Firestore values."""
+    s = str(level or "").strip().lower()
+    if s in ("supervisor", "Supervisor".lower()):
+        return "Supervisor"
+    if s in ("employee", "operator"):
+        return "Employee"
+    # Already app-style or unknown — title-case common values
+    raw = str(level or "").strip()
+    if raw.lower() == "supervisor":
+        return "Supervisor"
+    if raw in ("Supervisor", "Employee"):
+        return raw
+    return "Employee"
+
+# fire_sync_operator_list results
+SYNC_OPS_EQUAL = "equal"   # versions match — nothing to do
+SYNC_OPS_PUSH = "push"     # cloud newer — send operators to IoT
+SYNC_OPS_PULL = "pull"     # IoT newer (e.g. BLE sync) — request operators from IoT
+
 def fire_read_operators_version():
     try:
         uid = read_user_id_from_file()
@@ -1333,6 +1565,116 @@ def fire_read_operators(userId=""):
     except Exception as e:
         printDebug(f"ERROR: fire_read_operators(): {e}",cfg.PRINT_DEBUG_ERROR)
         return []
+def fire_apply_iot_operators(operators_list, iot_operators_version, from_device_id=""):
+    """Upsert operators reported by IoT (BLE push) into Firestore + local cache."""
+    global operators_version_file
+    global operators_data_file
+    global operators_version
+
+    try:
+        uid = read_user_id_from_file()
+        if len(uid) < 28:
+            printDebug(
+                "Cant apply IoT operators. No User ID found. Connect Android app to Base Station",
+                cfg.PRINT_DEBUG_ERROR,
+            )
+            return False
+
+        if not isinstance(operators_list, list) or not operators_list:
+            printDebug("IoT operators list empty — ignore", cfg.PRINT_DEBUG_OPERATOR)
+            return False
+
+        iot_v = _operators_ver_int(iot_operators_version)
+        fire_v = _operators_ver_int(fire_read_operators_version())
+        if iot_v <= fire_v:
+            printDebug(
+                f"Ignore IoT operators (stale): iot={iot_v} fire={fire_v} from={from_device_id!r}",
+                cfg.PRINT_DEBUG_OPERATOR,
+            )
+            return False
+
+        printDebug(
+            f"Applying {len(operators_list)} operators from IoT {from_device_id!r} "
+            f"(ver {fire_v} → {iot_v})",
+            cfg.PRINT_DEBUG_OPERATOR,
+        )
+
+        ops_col = (
+            dbFire.collection(FIRE_COLLECT_USERS)
+            .document(uid)
+            .collection(FIRE_COLLECT_OPERATORS)
+        )
+
+        operator_data = []
+        batch = dbFire.batch()
+        batch_count = 0
+
+        for op in operators_list:
+            if not isinstance(op, dict):
+                continue
+            doc_id = str(op.get(FIRE_DOC_ID, "") or "").strip()
+            tag_id = str(op.get(FIRE_OPERATOR_TAG_ID, "") or "").strip()
+            if not tag_id or tag_id.lower() == "none":
+                continue
+
+            fields = {
+                FIRE_OPERATOR_NAME: str(op.get(FIRE_OPERATOR_NAME, "") or ""),
+                FIRE_OPERATOR_SURNAME: str(op.get(FIRE_OPERATOR_SURNAME, "") or ""),
+                FIRE_OPERATOR_ACCESS_LEVEL: _normalize_access_level_for_fire(
+                    op.get(FIRE_OPERATOR_ACCESS_LEVEL, "")
+                ),
+                FIRE_OPERATOR_TAG_ID: tag_id,
+            }
+            if doc_id:
+                fields[FIRE_DOC_ID] = doc_id
+                ref = ops_col.document(doc_id)
+            else:
+                ref = ops_col.document()
+                doc_id = ref.id
+                fields[FIRE_DOC_ID] = doc_id
+
+            batch.set(ref, fields, merge=True)
+            batch_count += 1
+            operator_data.append(dict(fields))
+
+            # Firestore batch limit 500
+            if batch_count >= 400:
+                batch.commit()
+                batch = dbFire.batch()
+                batch_count = 0
+
+        if batch_count > 0:
+            batch.commit()
+
+        ver_str = (
+            str(iot_operators_version).strip()
+            if iot_operators_version is not None
+            else str(iot_v)
+        )
+        dbFire.collection(FIRE_COLLECT_USERS).document(uid).set(
+            {FIRE_OPERATOR_VERSION: ver_str},
+            merge=True,
+        )
+
+        with open(operators_data_file, "wb") as f:
+            pickle.dump(operator_data, f)
+        with open(operators_version_file, "wb") as f:
+            pickle.dump(ver_str, f)
+
+        operators_version = ver_str
+        # Notify other wheels (source IoT already has this ver — SYNC will be equal).
+        # Debounced with Firestore listener so we don't double-broadcast.
+        _mark_new_operator_data_available(f"iot-apply:{from_device_id}")
+        printDebug(
+            f"Saved {len(operator_data)} IoT operators to cloud (ver={ver_str})",
+            cfg.PRINT_DEBUG_OPERATOR,
+        )
+        return True
+
+    except Exception as e:
+        printDebug(f"ERROR: fire_apply_iot_operators: {e}", cfg.PRINT_DEBUG_ERROR)
+        return False
+
 def fire_sync_operator_list(iot_operators_version = "0"):
     global operators_version_file
     global operators_data_file
@@ -1341,19 +1683,29 @@ def fire_sync_operator_list(iot_operators_version = "0"):
         uid = read_user_id_from_file()
         if(len(uid) < 28):  # Firestore User Doc IDs are 28 chars long
             printDebug("Cant sync operator list. No User ID found. Connect Android app to Base Station",cfg.PRINT_DEBUG_ERROR)
-            return "0"
+            return SYNC_OPS_EQUAL
         
         printDebug(f"Syncing operators for UID: {uid}...",cfg.PRINT_DEBUG_GENERAL)
         
         fire_operator_ver = fire_read_operators_version()
-        printDebug(f"fire_operator_ver: {fire_operator_ver}...",cfg.PRINT_DEBUG_OPERATOR)
-        printDebug(f"iot_operator_ver: {iot_operators_version}...",cfg.PRINT_DEBUG_OPERATOR)
+        fire_v = _operators_ver_int(fire_operator_ver)
+        iot_v = _operators_ver_int(iot_operators_version)
+        printDebug(f"fire_operator_ver: {fire_operator_ver} ({fire_v})...",cfg.PRINT_DEBUG_OPERATOR)
+        printDebug(f"iot_operator_ver: {iot_operators_version} ({iot_v})...",cfg.PRINT_DEBUG_OPERATOR)
         
-        if(fire_operator_ver == iot_operators_version):
+        if fire_v == iot_v:
             printDebug("Operators Up to Date.",cfg.PRINT_DEBUG_OPERATOR)
-            return False
+            return SYNC_OPS_EQUAL
+
+        # Wheel has newer tags (e.g. Android BLE sync while offline)
+        if iot_v > fire_v:
+            printDebug(
+                "IoT operators newer than cloud — request pull from wheel",
+                cfg.PRINT_DEBUG_OPERATOR,
+            )
+            return SYNC_OPS_PULL
         
-        # Get Operators
+        # Cloud newer — prepare local cache then push to IoT
         operators = fire_read_operators(uid)
     
         if operators:
@@ -1377,11 +1729,11 @@ def fire_sync_operator_list(iot_operators_version = "0"):
         with open(operators_version_file, 'wb') as f:
             pickle.dump(fire_operator_ver, f)
         
-        return True
+        return SYNC_OPS_PUSH
     
     except Exception as e:
         printDebug(f"ERROR: sync_operator_list: {e}",cfg.PRINT_DEBUG_ERROR)
-        return False
+        return SYNC_OPS_EQUAL
 
 
 # Bluetooth 
@@ -1469,7 +1821,25 @@ def add_paired_iot(ble_address: str = "", ble_name: str = "") -> bool:
         })
         _save_paired_iots_unlocked()
     printDebug(f"Paired IoT added: name={name!r} addr={addr!r}", cfg.PRINT_DEBUG_MONITOR)
+    _warn_paired_firestore_iot_mismatch()
     return True
+def find_paired_iot_address(ble_name: str = "", ble_address: str = "") -> str:
+    """Return stored BLE address for a paired IoT (case-insensitive name/addr)."""
+    addr = (ble_address or "").strip().upper()
+    name = (ble_name or "").strip()
+    if not addr and not name:
+        return ""
+    with cfg._paired_iots_lock:
+        for entry in cfg.PAIRED_IOTS:
+            ea = (entry.get("ble_address") or "").strip()
+            en = (entry.get("ble_name") or "").strip()
+            if addr and ea.upper() == addr:
+                return ea
+            if name and en and en.upper() == name.upper():
+                return ea
+    return ""
+
+
 def remove_paired_iot(ble_address: str = "", ble_name: str = "") -> bool:
     addr = (ble_address or "").strip().upper()
     name = (ble_name or "").strip()
@@ -1478,9 +1848,11 @@ def remove_paired_iot(ble_address: str = "", ble_name: str = "") -> bool:
     with cfg._paired_iots_lock:
         keep = []
         for entry in cfg.PAIRED_IOTS:
+            ea = (entry.get("ble_address") or "").strip()
+            en = (entry.get("ble_name") or "").strip()
             match = (
-                (addr and entry.get("ble_address", "").upper() == addr)
-                or (name and entry.get("ble_name", "") == name)
+                (addr and ea.upper() == addr)
+                or (name and en and en.upper() == name.upper())
             )
             if match:
                 removed = True
@@ -1491,6 +1863,7 @@ def remove_paired_iot(ble_address: str = "", ble_name: str = "") -> bool:
             _save_paired_iots_unlocked()
     if removed:
         printDebug(f"Paired IoT removed: name={name!r}", cfg.PRINT_DEBUG_MONITOR)
+        _warn_paired_firestore_iot_mismatch()
     return removed
 def should_send_ble_credentials(device) -> bool:
     """
@@ -1665,41 +2038,86 @@ async def bt_send_shoesh(device) -> bool:
     except Exception as e:
         printDebug(f"ERROR: bt_send_shoesh() {getattr(device, 'name', '?')}: {e}", cfg.PRINT_DEBUG_BT)
         return False
-async def bt_send_shoesh_to_iot(ble_name: str) -> bool:
-    """Find a connected BLE IoT by name (MQTT from id) and send SHOESH."""
+def _bt_client_by_addr(addr: str):
+    """Lookup Bleak client; address keys may differ in case."""
+    if not addr:
+        return None
+    client = BT_CLIENTS.get(addr)
+    if client is not None:
+        return client
+    key = addr.upper()
+    for k, v in BT_CLIENTS.items():
+        if (k or "").upper() == key:
+            return v
+    return None
+
+
+async def bt_send_shoesh_to_iot(ble_name: str, ble_address: str = "") -> bool:
+    """Send SHOESH over BLE if that IoT is currently connected; else soft-skip.
+
+    MQTT #UNPAIR_MONITOR already stops the wheel when reachable; BLE SHOESH is
+    only a backup when a live GATT link exists.
+    """
     name = (ble_name or "").strip()
-    if not name:
+    if not name and not (ble_address or "").strip():
         return False
 
+    cooldown_key = name or (ble_address or "").strip().upper()
     now = time.monotonic()
-    last = _shoesh_last_sent.get(name, 0.0)
+    last = _shoesh_last_sent.get(cooldown_key, 0.0)
     if now - last < _SHOESH_COOLDOWN_S:
         return False
 
-    addr = None
-    for entry in lstBtConnectedDevices:
-        en = (entry.get(CONNECT_NAME) or "").strip()
-        if en == name or en.upper() == name.upper():
-            addr = entry.get(CONNECT_ADR)
-            break
+    addr = (ble_address or "").strip() or None
+    if not addr and name:
+        addr = find_paired_iot_address(ble_name=name) or None
+    if not addr and name:
+        for entry in lstBtConnectedDevices:
+            en = (entry.get(CONNECT_NAME) or "").strip()
+            if en == name or en.upper() == name.upper():
+                addr = entry.get(CONNECT_ADR)
+                break
+    # Also match connected list by stored address when name differs / Unknown
+    if addr:
+        addr_u = addr.upper()
+        for entry in lstBtConnectedDevices:
+            ea = (entry.get(CONNECT_ADR) or "").strip()
+            if ea.upper() == addr_u:
+                addr = ea
+                if not name:
+                    name = (entry.get(CONNECT_NAME) or "").strip() or name
+                break
 
     if not addr:
-        printDebug(f"SHOESH: no BLE device for {name!r}", cfg.PRINT_DEBUG_BT)
+        printDebug(
+            f"SHOESH skipped for {name or '?'!r}: no BLE link "
+            f"(MQTT unpair already applied if reachable)",
+            cfg.PRINT_DEBUG_BT,
+        )
         return False
 
-    client = BT_CLIENTS.get(addr)
+    client = _bt_client_by_addr(addr)
     if client is None or not client.is_connected:
-        printDebug(f"SHOESH: BLE not connected for {name!r}", cfg.PRINT_DEBUG_BT)
+        printDebug(
+            f"SHOESH skipped for {name or addr!r}: BLE not connected "
+            f"(MQTT unpair already applied if reachable)",
+            cfg.PRINT_DEBUG_BT,
+        )
         return False
 
     class _Dev:
         pass
 
     dev = _Dev()
+    # Prefer the key Bleak actually used so bt_get_client hits BT_CLIENTS
+    for k in BT_CLIENTS:
+        if (k or "").upper() == addr.upper():
+            addr = k
+            break
     dev.address = addr
-    dev.name = name
+    dev.name = name or addr
     if await bt_send_shoesh(dev):
-        _shoesh_last_sent[name] = now
+        _shoesh_last_sent[cooldown_key] = now
         return True
     return False
 async def bt_send_credentials(device, force: bool = False):
@@ -1863,6 +2281,7 @@ async def main():
     global IP_ADDRESS
     global mqtt_broker
     global new_operator_data_available
+    global _new_operator_data_since
     casePtr = 0
 
     while True:
@@ -2012,11 +2431,21 @@ async def main():
 
                 saved = _normalize_ssid(WIFI_SSID)
                 connected = _normalize_ssid(get_connected_wifi_ssid(INTERFACE_WIFI))
-                
-                if saved and connected and not wifi_ssids_match(saved, connected):
-                    printDebug(f"Saved SSID: {saved or '(none)'}", True)
-                    printDebug(f"My SSID: {connected or '(none)'}", True)
-                    printDebug("WiFi SSID MISMATCH",True,)
+                printDebug(f"Saved SSID: {saved or '(none)'}", True)
+                printDebug(f"My SSID: {connected or '(none)'}", True)
+                if not connected:
+                    printDebug(
+                        "My SSID lookup returned none — check nmcli on wlan0 "
+                        "(active connection / wifi radio)",
+                        True,
+                    )
+                if saved and connected and not wifi_ssids_match(WIFI_SSID, connected):
+                    printDebug("WiFi SSID MISMATCH", True)
+                    printDebug(
+                        f"SSID compare detail: saved={_ssid_debug(WIFI_SSID)} "
+                        f"connected={_ssid_debug(connected)}",
+                        True,
+                    )
                 elif saved and connected:
                     printDebug(f"WiFi SSID OK: '{saved}'", True)
                 #print(f"Password: {WIFI_PASSWORD}") 
@@ -2053,11 +2482,14 @@ async def main():
                         _wifi_watchdog_next = now + WIFI_WATCHDOG_INTERVAL_S
                         #await ensure_wifi_connected()
 
-                # New Operator Data Available
+                # New Operator Data Available (debounce burst of version bumps)
                 if new_operator_data_available:
-                    new_operator_data_available = False
-                    mqtt_broker.broadcastNewDataAvailable(IOT_TYPE_WHEEL)
-                    printDebug("New data available",cfg.PRINT_DEBUG_GENERAL)
+                    age = time.monotonic() - float(_new_operator_data_since or 0.0)
+                    if age >= _NEW_DATA_DEBOUNCE_S:
+                        new_operator_data_available = False
+                        _new_operator_data_since = 0.0
+                        mqtt_broker.broadcastNewDataAvailable(IOT_TYPE_WHEEL)
+                        printDebug("New data available", cfg.PRINT_DEBUG_GENERAL)
 
                 try:
                     if not mqtt_broker.queue.empty():
@@ -2096,13 +2528,18 @@ async def main():
                         # Unpair — remove IoT from local paired list; SHOESH over BLE if connected
                         elif command == MqttService.MQTT_CMD_UNPAIR_MONITOR:
                             to_id = message.get(MqttService.MQTT_SETTING_TO_DEVICE_ID, "") or ""
+                            # Capture address before remove so BLE SHOESH can still find the client
+                            paired_addr = find_paired_iot_address(ble_name=to_id)
                             removed = remove_paired_iot(ble_name=to_id)
                             printDebug(
-                                f"UNPAIR_MONITOR: ble_name={to_id!r} removed={removed}",
+                                f"UNPAIR_MONITOR: ble_name={to_id!r} addr={paired_addr!r} "
+                                f"removed={removed}",
                                 cfg.PRINT_DEBUG_MONITOR,
                             )
                             if to_id:
-                                asyncio.create_task(bt_send_shoesh_to_iot(to_id))
+                                asyncio.create_task(
+                                    bt_send_shoesh_to_iot(to_id, ble_address=paired_addr)
+                                )
 
                         # Connect Base
                         elif command == MqttService.MQTT_CMD_CONNECT_BASE:
@@ -2127,17 +2564,39 @@ async def main():
                             iot_type = payload.get(MqttService.MQTT_SETTING_IOT_TYPE, "")
                             iot_operator_version = payload.get(MqttService.MQTT_SETTING_OPERATORS_VERSION, "")
                             
-                            # Sync Operators — send to this IoT only (not a shared global target)
+                            # Sync Operators — push cloud→IoT or pull IoT→cloud when wheel is newer
                             if iot_type == IOT_TYPE_WHEEL and from_id:
-                                if fire_sync_operator_list(iot_operator_version):
+                                sync_result = fire_sync_operator_list(iot_operator_version)
+                                if sync_result == SYNC_OPS_PUSH:
                                     operators = read_local_operators_from_file()
                                     if operators:
                                         ver = read_local_operators_ver_from_file()
                                         if ver is None:
                                             ver = operators_version
-                                        mqtt_broker.sendOperators(
-                                            operators, ver, to_device_id=from_id
-                                        )
+                                        if _should_push_operators_to_device(from_id, ver):
+                                            mqtt_broker.sendOperators(
+                                                operators, ver, to_device_id=from_id
+                                            )
+                                            _record_operators_pushed(from_id, ver)
+                                elif sync_result == SYNC_OPS_PULL:
+                                    printDebug(
+                                        f"Requesting operators from IoT {from_id!r}",
+                                        cfg.PRINT_DEBUG_OPERATOR,
+                                    )
+                                    mqtt_broker.requestOperators(from_id)
+
+                        # Operators from IoT (after #REQ_OPERATORS / BLE-updated tags)
+                        elif command == MqttService.MQTT_CMD_OPERATOR_DATA:
+                            from_id = message.get(MqttService.MQTT_SETTING_FROM_DEVICE_ID, "")
+                            if not isinstance(payload, dict):
+                                payload = {}
+                            ops_list = payload.get(MqttService.MQTT_SETTING_OPERATORS_LIST, [])
+                            ops_ver = payload.get(MqttService.MQTT_SETTING_OPERATORS_VERSION, "")
+                            asyncio.create_task(
+                                asyncio.to_thread(
+                                    fire_apply_iot_operators, ops_list, ops_ver, from_id
+                                )
+                            )
                      
                 except Empty:
                     pass
