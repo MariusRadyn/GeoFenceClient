@@ -1941,8 +1941,9 @@ async def bt_discover():
                     dev[CONNECT_STATUS] = False
             
             for device in targets:
-                # Connect + subscribe to notifies so we can receive PAIRING / WIFI_OK / IDLE
-                await bt_connect(device)
+                # In scan results ⇒ advertising. If we still think we're connected,
+                # the wheel likely power-cycled — force reconnect so PAIRING/wificred works.
+                await bt_connect(device, peer_is_advertising=True)
                 await bt_update_connection_status(device)
                 # Credentials are sent only on BLE PAIRING notify (see bt_on_iot_notify)
 
@@ -1950,16 +1951,44 @@ async def bt_discover():
             await asyncio.sleep(1)
 
         await asyncio.sleep(10)   # yield 10s
-async def bt_connect(device):
+async def bt_connect(device, *, peer_is_advertising: bool = False):
+    """Connect (or reuse) a Bleak client for this IoT.
+
+    After a wheel power-cycle BlueZ/Bleak often still reports is_connected until
+    supervision timeout. If the peer is advertising again, drop the stale link
+    and reconnect so PAIRING → wificred can run.
+    """
     global BT_CLIENTS
     address = device.address
 
-    # Already have a client?
-    if address in BT_CLIENTS and BT_CLIENTS[address].is_connected:
-        #printDebug(f"Already connected: {device.name} ({address}) ",cfg.PRINT_DEBUG_BT)
-        return True
+    existing = BT_CLIENTS.get(address)
+    if existing is None:
+        for k, v in list(BT_CLIENTS.items()):
+            if (k or "").upper() == (address or "").upper():
+                existing = v
+                address = k
+                break
 
-    printDebug(f"Connecting BT : {device.name} ({address}) ... ",cfg.PRINT_DEBUG_GENERAL)
+    if existing is not None and existing.is_connected:
+        if not peer_is_advertising:
+            return True
+        printDebug(
+            f"BLE: {getattr(device, 'name', '?')} advertising while cached "
+            f"connected — dropping stale link and reconnecting",
+            cfg.PRINT_DEBUG_BT,
+        )
+        try:
+            await existing.disconnect()
+        except Exception:
+            pass
+        BT_CLIENTS.pop(address, None)
+        for k in list(BT_CLIENTS.keys()):
+            if (k or "").upper() == (address or "").upper():
+                BT_CLIENTS.pop(k, None)
+    elif existing is not None and not existing.is_connected:
+        BT_CLIENTS.pop(address, None)
+
+    printDebug(f"Connecting BT : {device.name} ({device.address}) ... ",cfg.PRINT_DEBUG_GENERAL)
     
     client = BleakClient(device)
 
@@ -1977,7 +2006,7 @@ async def bt_connect(device):
         await client.start_notify(CHAR_UUID, _on_notify)
 
         # Store and reuse this client
-        BT_CLIENTS[address] = client
+        BT_CLIENTS[device.address] = client
 
         printDebug(f"SUCCESSFUL",cfg.PRINT_DEBUG_GENERAL)
         return True
